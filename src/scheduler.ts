@@ -8,8 +8,11 @@ import { dueRuns, RUN_SLICE_MS, type RunStore } from "./store.js";
  * 0004): each tick, per team, a run whose slice is long over goes back to
  * the queue from its checkpoint (its runner is gone), a run waiting on a
  * service's task is queued when its poll is due, a waiting run gets its
- * summary before the cache goes cold, and due runs are handed to the
- * runner, one per agent, none of a paused or disabled agent. Hourly,
+ * summary before the cache goes cold, sessions asked to close after their
+ * run close once it has ended, and due runs are handed to the runner, per
+ * agent as many as its cap of active sessions leaves, none of a paused or
+ * disabled agent. A run waiting for a free session is so picked up at the
+ * first tick after one stops working, a fresh process's first included. Hourly,
  * transcripts of runs ended 30 days ago are purged and sessions idle for 7
  * days close.
  */
@@ -51,8 +54,10 @@ export function createScheduler({
       if ((run.state === "input_required" || run.state === "auth_required") && run.cacheUntil && Date.parse(run.cacheUntil) - at.getTime() <= SUMMARY_LEAD_MS)
         await runner.summarize(teamId, run.id).catch(onError);
     }
+    await runs.closeFinishedSessions(at);
     const team = agents.forTeam(teamId);
-    for (const run of dueRuns(await runs.listRuns({ states: ["queued", "working"] }), at)) {
+    const caps = new Map((await team.listAgents()).map((agent) => [agent.id, agent.maxActiveSessions]));
+    for (const run of dueRuns(await runs.listRuns({ states: ["queued", "working"] }), at, (agentId) => caps.get(agentId) ?? 1)) {
       if (working.size >= concurrency) return;
       if (working.has(run.id) || (await agentHold(await team.findAgent(run.agentId), directory)) !== undefined) continue;
       working.add(run.id);

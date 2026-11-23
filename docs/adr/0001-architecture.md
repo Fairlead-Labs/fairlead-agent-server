@@ -66,8 +66,10 @@
      code execution or remote MCP connectors.
 5. **Runs park in Postgres; nothing relies on provider-side state.**
    - Sessions, runs and steps have row-level security on `team_id`. Each
-     step is checkpointed. Each run is claimed by compare-and-set; one run
-     per agent works at a time; parked runs do not count.
+     step is checkpointed. Each run is claimed by compare-and-set, under a
+     lock on its agent; an agent works at most its cap of active sessions'
+     runs at a time (set per agent), and runs beyond it wait queued, so the
+     cap is never a refusal; parked runs do not count.
    - Each step sends the whole conversation. Nothing relies on state a
      provider keeps, such as OpenAI's `previous_response_id`.
    - A parked run holds no compute, the service refuses its id, and it has

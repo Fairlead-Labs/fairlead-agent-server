@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { RUN_ID_HEADER, RUN_STEP_HEADER, type Run } from "../src/index.js";
+import { createScheduler, RUN_ID_HEADER, RUN_STEP_HEADER, type Run } from "../src/index.js";
+import { newAgent } from "./support/db.js";
 import { call, MODEL, say, sentTo, startWorld, type World } from "./support/world.js";
 
 /**
  * The runner, the scheduler and work intake together (requirement 0001,
- * RN3–RN13; requirement 0004, AS3–AS5, AS8–AS10): real Postgres
+ * RN3–RN13; requirement 0004, AS3–AS5, AS8–AS10, AS14, AS15): real Postgres
  * semantics, a fake Anthropic API and a fake host MCP service.
  */
 
@@ -407,5 +408,101 @@ describe("the summary while waiting (requirement 0001)", () => {
     await w.tick();
     expect(sentTo(w.anthropic, 2)).toContain("Waiting for which invoice.");
     expect(MODEL).toBeTruthy();
+  });
+});
+
+describe("closing after a run and the cap of active sessions (requirement 0004)", () => {
+  it("AS14: a trigger naming its session with close closes the session after its run. Negative: another agent's session or a closed one is refused", async () => {
+    const { teamId, agent } = await w.team();
+    const first = await hostTrigger(teamId, agent.id, { task: "A" });
+    w.anthropic.script(say("Done A."), say("Summary A."));
+    await w.tick();
+    const closing = await w.work.receive({ teamId, agentId: agent.id, sender: "host", userId: null, event: "task.done", reference: randomUUID(), body: "{}", sessionId: first.sessionId, close: true });
+    expect(closing).toMatchObject({ sessionId: first.sessionId, duplicate: false, queued: false });
+    expect(await w.store.forTeam(teamId).findSession(first.sessionId)).toMatchObject({ state: "open", closeAfterRun: true });
+    w.anthropic.script(say("Wrapped up."), say("Summary: done."));
+    await w.tick();
+    await w.tick();
+    expect(await w.store.forTeam(teamId).findSession(first.sessionId)).toMatchObject({ state: "closed", closeReason: "closed" });
+    expect((await runsOf(teamId, first.sessionId)).map((r) => r.state)).toEqual(["completed", "completed"]);
+
+    await expect(w.work.receive({ teamId, agentId: agent.id, sender: "host", userId: null, event: "e", reference: randomUUID(), body: "", sessionId: first.sessionId, close: true })).rejects.toMatchObject({ code: "closed" });
+    const other = newAgent(teamId, { profileId: agent.profileId });
+    await w.agents.forTeam(teamId).insertAgent(other);
+    const theirs = await hostTrigger(teamId, other.id);
+    await expect(w.work.receive({ teamId, agentId: agent.id, sender: "host", userId: null, event: "e", reference: randomUUID(), body: "", sessionId: theirs.sessionId, close: true })).rejects.toMatchObject({ code: "not-found" });
+    expect(await w.store.forTeam(teamId).findSession(theirs.sessionId)).toMatchObject({ state: "open", closeAfterRun: false });
+  });
+
+  it("AS15: a trigger beyond the agent's cap is accepted as queued, never refused; its run starts once one of the agent's runs stops working, the oldest first; the same reference again starts it once", async () => {
+    const { teamId, agent } = await w.team({ maxActiveSessions: 1 });
+    let during: Promise<[Awaited<ReturnType<typeof hostTrigger>>, Awaited<ReturnType<typeof hostTrigger>>]> | undefined;
+    const references = [randomUUID(), randomUUID()];
+    w.hostTools.push({
+      name: "read_ledger",
+      readOnly: true,
+      answer: () => {
+        during = (async () => [await hostTrigger(teamId, agent.id, { task: "B" }, references[0]), await hostTrigger(teamId, agent.id, { task: "C" }, references[1])] as [Awaited<ReturnType<typeof hostTrigger>>, Awaited<ReturnType<typeof hostTrigger>>])();
+        return { text: "Ledger read." };
+      },
+    });
+    const a = await hostTrigger(teamId, agent.id, { task: "A" });
+    expect(a).toMatchObject({ queued: false });
+    w.anthropic.script(call("read_ledger"), say("Done A."), say("Summary A."));
+    await w.tick();
+    const [b, c] = await during!;
+    expect(b).toMatchObject({ duplicate: false, queued: true });
+    expect(c).toMatchObject({ duplicate: false, queued: true });
+    expect(await hostTrigger(teamId, agent.id, { task: "C again" }, references[1])).toEqual({ ...c, duplicate: true });
+    expect((await lastRun(teamId, a.sessionId)).state).toBe("completed");
+
+    w.anthropic.script(say("Done B."), say("Summary B."));
+    await w.tick();
+    expect((await lastRun(teamId, b.sessionId)).state, "the oldest first").toBe("completed");
+    expect(await runsOf(teamId, c.sessionId)).toEqual([expect.objectContaining({ state: "queued" })]);
+    w.anthropic.script(say("Done C."), say("Summary C."));
+    await w.tick();
+    expect(await runsOf(teamId, c.sessionId), "started once").toEqual([expect.objectContaining({ state: "completed" })]);
+    expect(sentTo(w.anthropic, -2)).toContain("C");
+    expect(sentTo(w.anthropic, -2)).not.toContain("C again");
+  });
+
+  it("negative (AS15): a session waiting on a person does not hold the cap", async () => {
+    const { teamId, agent } = await w.team({ maxActiveSessions: 1 });
+    const asking = await hostTrigger(teamId, agent.id, { task: "A" });
+    w.anthropic.script(call("ask_person", { question: "Which account?" }));
+    await w.tick();
+    expect(await lastRun(teamId, asking.sessionId)).toMatchObject({ state: "input_required" });
+    const next = await hostTrigger(teamId, agent.id, { task: "B" });
+    expect(next).toMatchObject({ queued: false });
+    w.anthropic.script(say("Done B."), say("Summary B."));
+    await w.tick();
+    expect(await lastRun(teamId, next.sessionId)).toMatchObject({ state: "completed" });
+  });
+
+  it("negative (AS15): another agent's run stopping starts nothing for this one; its own stopping does, at the next wake of a scheduler that was not running", async () => {
+    const { teamId, agent } = await w.team({ maxActiveSessions: 1 });
+    const first = await hostTrigger(teamId, agent.id, { task: "A" });
+    // Worked elsewhere: claimed by another instance of the server.
+    const working = await w.store.forTeam(teamId).claim((await lastRun(teamId, first.sessionId)).id, w.at);
+    expect(working).toMatchObject({ state: "working" });
+    const waiting = await hostTrigger(teamId, agent.id, { task: "B" });
+    expect(waiting).toMatchObject({ queued: true });
+
+    const other = newAgent(teamId, { profileId: agent.profileId, maxActiveSessions: 1 });
+    await w.agents.forTeam(teamId).insertAgent(other);
+    const theirs = await hostTrigger(teamId, other.id, { task: "X" });
+    w.anthropic.script(say("Done X."), say("Summary X."));
+    await w.tick();
+    expect(await lastRun(teamId, theirs.sessionId)).toMatchObject({ state: "completed" });
+    await w.tick();
+    expect(await lastRun(teamId, waiting.sessionId)).toMatchObject({ state: "queued" });
+    expect(w.anthropic.requests).toHaveLength(2);
+
+    await w.work.stopRun(teamId, working!.id);
+    const woken = createScheduler({ store: w.store, agents: w.agents, directory: w.directory, runner: w.runner, now: () => w.at, onError: (error) => { throw error; } });
+    w.anthropic.script(say("Done B."), say("Summary B."));
+    await Promise.all(await woken.tick());
+    expect(await lastRun(teamId, waiting.sessionId)).toMatchObject({ state: "completed" });
   });
 });

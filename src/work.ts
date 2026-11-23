@@ -4,7 +4,7 @@ import type { Directory } from "./directory/index.js";
 import type { TeamSealer } from "./keys.js";
 import { noNotifier, type Notifier } from "./notify.js";
 import { agentHold } from "./runner.js";
-import { newRun, OPEN_RUN_STATES, type Question, type Run, type RunStore, type Session, type TeamRunStore, type Trigger } from "./store.js";
+import { dueRuns, newRun, OPEN_RUN_STATES, type Question, type Run, type RunStore, type Session, type TeamRunStore, type Trigger } from "./store.js";
 
 /**
  * Work intake and the people's side of it (requirement 0004, *Sessions*,
@@ -35,6 +35,8 @@ export interface TriggerInput {
   ownerUserIds?: string[];
   priority?: Run["priority"];
   dueOn?: string;
+  /** Close the session once this trigger's run has ended. */
+  close?: boolean;
 }
 
 const EVENT = /^[\x21-\x7e]{1,200}$/;
@@ -71,6 +73,13 @@ export function createWork({
       });
   }
 
+  /** Whether the session's run waits for a free session: queued, and not among the agent's runs its cap lets start now. */
+  async function waitsForCap(runs: TeamRunStore, agent: Agent, sessionId: string) {
+    const live = await runs.listRuns({ agentId: agent.id, states: ["queued", "working"] });
+    const mine = live.find((run) => run.sessionId === sessionId);
+    return mine?.state === "queued" && Date.parse(mine.queuedAt) <= now().getTime() && !dueRuns(live, now(), () => agent.maxActiveSessions).some((run) => run.id === mine.id);
+  }
+
   async function members(teamId: string, userIds: readonly string[]) {
     for (const id of userIds) if ((await directory.roleOf(teamId, id)) === undefined) throw new WorkError("invalid");
   }
@@ -96,8 +105,13 @@ export function createWork({
   }
 
   return {
-    /** A trigger in: the session it started or continued, and whether its sender had sent this reference before (then nothing new is queued). */
-    async receive(input: TriggerInput): Promise<{ sessionId: string; triggerId: string; duplicate: boolean }> {
+    /**
+     * A trigger in: the session it started or continued, whether its sender
+     * had sent this reference before (then nothing new is queued), and
+     * whether its session's run waits for a free session (the agent's cap of
+     * active sessions). Never refused for the cap.
+     */
+    async receive(input: TriggerInput): Promise<{ sessionId: string; triggerId: string; duplicate: boolean; queued: boolean }> {
       if (!EVENT.test(input.event) || !EVENT.test(input.reference) || Buffer.byteLength(input.body) > MAX_BODY) throw new WorkError("invalid");
       if (input.dueOn !== undefined && (!DAY.test(input.dueOn) || Number.isNaN(Date.parse(input.dueOn)))) throw new WorkError("invalid");
       const agent = await agents.forTeam(input.teamId).findAgent(input.agentId);
@@ -110,7 +124,7 @@ export function createWork({
 
       // A reference its sender sent before starts nothing new.
       const known = await runs.findTriggerByReference(agent!.id, input.sender, input.reference);
-      if (known) return { sessionId: known.sessionId, triggerId: known.id, duplicate: true };
+      if (known) return { sessionId: known.sessionId, triggerId: known.id, duplicate: true, queued: await waitsForCap(runs, agent!, known.sessionId) };
 
       let session: Session | undefined;
       if (input.sessionId !== undefined) {
@@ -131,6 +145,7 @@ export function createWork({
           updatedAt: stamp,
           lastActivityAt: stamp,
           closedAt: null,
+          closeAfterRun: false,
           version: 1,
         };
         // ponytail: two first sends of one reference at once may leave an empty session, closed as idle after 7 days.
@@ -152,10 +167,12 @@ export function createWork({
         runId: null,
       };
       const stored = await runs.insertTrigger(trigger);
-      if (stored.stored === "exists") return { sessionId: stored.trigger.sessionId, triggerId: stored.trigger.id, duplicate: true };
+      if (stored.stored === "exists")
+        return { sessionId: stored.trigger.sessionId, triggerId: stored.trigger.id, duplicate: true, queued: await waitsForCap(runs, agent!, stored.trigger.sessionId) };
       await runs.touchSession(session.id, trigger.receivedAt);
       await queueRun(runs, session, { priority: input.priority ?? null, dueOn: input.dueOn ?? null });
-      return { sessionId: session.id, triggerId: trigger.id, duplicate: false };
+      if (input.close === true) await runs.closeAfterRun(session.id);
+      return { sessionId: session.id, triggerId: trigger.id, duplicate: false, queued: await waitsForCap(runs, agent!, session.id) };
     },
 
     /** An answer to a question by one of its session's owners (any member while the session has none): the run that waits on it goes on, or, for a runner question answered `stop`, ends. */

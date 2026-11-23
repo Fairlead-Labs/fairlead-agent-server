@@ -329,6 +329,28 @@ describe("the host's triggers (requirement 0002)", () => {
     expect((await w.store.forTeam(teamId).listSessions()).map((s) => s.id)).toEqual([first.body.sessionId]);
   });
 
+  it("AS14, AS15: a trigger's answer says whether it waits for a free session; `close` is a boolean closing its session after the run. Negative: never refused for the cap; another agent's session 404, a closed one 409", async () => {
+    const { teamId, admin } = await team();
+    const agent = (await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Clerk", maxActiveSessions: 1 })).body;
+    const other = (await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Other" })).body;
+    const trigger = () => ({ teamId, agentId: agent.id, event: "task.assigned", reference: randomUUID() });
+    const first = await request(HOST_TOKEN, "POST", "/triggers", trigger());
+    expect(first).toMatchObject({ status: 202, body: { duplicate: false, queued: false } });
+    const [run] = await w.store.forTeam(teamId).listRuns({ sessionId: first.body.sessionId });
+    await w.store.forTeam(teamId).claim(run!.id, w.at);
+    const second = await request(HOST_TOKEN, "POST", "/triggers", trigger());
+    expect(second).toMatchObject({ status: 202, body: { duplicate: false, queued: true } });
+    expect((await request(admin, "GET", `/teams/${teamId}/sessions/${second.body.sessionId}`)).body).toMatchObject({ closeAfterRun: false, runs: [{ state: "queued" }] });
+
+    const closing = await request(HOST_TOKEN, "POST", "/triggers", { ...trigger(), sessionId: first.body.sessionId, close: true });
+    expect(closing).toMatchObject({ status: 202, body: { sessionId: first.body.sessionId, queued: false } });
+    expect((await request(admin, "GET", `/teams/${teamId}/sessions/${first.body.sessionId}`)).body).toMatchObject({ state: "open", closeAfterRun: true });
+    for (const close of ["yes", 1, null]) expect((await request(HOST_TOKEN, "POST", "/triggers", { ...trigger(), sessionId: first.body.sessionId, close })).status, JSON.stringify(close)).toBe(400);
+    expect((await request(HOST_TOKEN, "POST", "/triggers", { ...trigger(), agentId: other.id, sessionId: first.body.sessionId, close: true })).status).toBe(404);
+    await w.work.closeSession(teamId, second.body.sessionId);
+    expect((await request(HOST_TOKEN, "POST", "/triggers", { ...trigger(), sessionId: second.body.sessionId, close: true })).status).toBe(409);
+  });
+
   it("HK5: by identity, a token of the configured issuer for the audience naming the host's subject; another subject or audience is 401", async () => {
     const byIdentity = appWith(hostIdentitySender({ issuer: issuer.url, audience: AUDIENCE, subject: "host@example.test" }));
     const { teamId, admin } = await team();
@@ -426,6 +448,25 @@ describe("an agent's own connections (requirement 0004)", () => {
     await w.tick();
     expect((await runOf(teamId, sessionId)).state).toBe("completed");
     expect(JSON.stringify(w.anthropic.requests.at(-2)!.body.messages)).toContain("found Bob");
+  });
+
+  it("AS15: two runs of one agent working at once at one OAuth service: the token one renewed is taken by the other, which waits for no one", async () => {
+    const crm = await service({ tools: [echo], auth: "oauth", cimd: true });
+    const { teamId, admin, member, agent, base } = await setUp("oauth", crm);
+    const authorize = new URL((await request(admin, "POST", `${base}/oauth`)).body.authorizationUrl);
+    const back = new URL((await fetch(authorize, { redirect: "manual" })).headers.get("location")!);
+    expect((await request(undefined, "GET", `/oauth/callback${back.search}`)).status).toBe(200);
+    crm.revoke();
+    const sessions = [];
+    for (const message of ["Find Ada.", "Find Bob."]) sessions.push((await request(member, "POST", `/teams/${teamId}/agents/${agent.id}/sessions`, { message })).body.sessionId as string);
+    w.anthropic.script(toolCall("crm__lookup", { q: "Ada" }), toolCall("crm__lookup", { q: "Bob" }), say("Found."), say("Found."), say("Summary."), say("Summary."));
+    await w.tick();
+    for (const sessionId of sessions) expect((await runOf(teamId, sessionId)).state).toBe("completed");
+    const sent = JSON.stringify(w.anthropic.requests.map((r) => r.body.messages));
+    expect(sent).toContain("found Ada");
+    expect(sent).toContain("found Bob");
+    expect(sent).not.toContain("sign you in again");
+    expect((await request(admin, "GET", `/teams/${teamId}/agents/${agent.id}/credentials`)).body.credentials[0].state).toBe("active");
   });
 
   it("AS7: a tool refused for a missing scope (403 insufficient_scope) waits for a person; the next sign-in asks for the wider scope and the call goes through", async () => {

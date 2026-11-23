@@ -265,9 +265,21 @@ const HOST: readonly string[] = [
 /** The schema of the server's own tables; its connections search it first (`search_path`). */
 export const SERVER_SCHEMA = "agent_server";
 
+/**
+ * An agent's cap of active sessions enforced (requirement 0004): as many
+ * working runs per agent as its cap, checked by the claim under a lock on
+ * the agent, in place of one; and a session closing after its run.
+ */
+const CAP: readonly string[] = [
+  `DROP INDEX runs_one_working`,
+  `CREATE INDEX runs_working ON runs (team_id, agent_id) WHERE state = 'working'`,
+  `ALTER TABLE sessions ADD COLUMN close_after_run boolean NOT NULL DEFAULT false`,
+];
+
 export const MIGRATIONS: readonly Migration[] = [
   { name: "0001-server", statements: SERVER },
   { name: "0002-host-views-active-sessions", statements: HOST },
+  { name: "0003-active-sessions-cap", statements: CAP },
 ];
 
 /** Brings the database to this version's tables: the directory, then the server's own. Answers the names applied now. */

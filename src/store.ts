@@ -42,6 +42,8 @@ export interface Session {
   updatedAt: string;
   lastActivityAt: string;
   closedAt: string | null;
+  /** Closes once its run has ended and no trigger waits (a trigger's `close`). */
+  closeAfterRun: boolean;
   version: number;
 }
 
@@ -197,6 +199,10 @@ export interface TeamRunStore {
   closeIdleSessions(before: Date, at: Date): Promise<number>;
   /** Marks activity on an open session (a trigger, a run's end), whatever its version. */
   touchSession(id: string, at: string): Promise<void>;
+  /** Marks an open session to close after its run; false when it is not open. */
+  closeAfterRun(id: string): Promise<boolean>;
+  /** Closes sessions marked to close that have no open run and no undelivered trigger (`closed`); answers how many. */
+  closeFinishedSessions(at: Date): Promise<number>;
 
   /** `exists` (with the trigger stored before) when its sender already sent this reference for the agent. */
   insertTrigger(trigger: Trigger): Promise<{ stored: "ok" } | { stored: "exists"; trigger: Trigger }>;
@@ -210,9 +216,9 @@ export interface TeamRunStore {
   findRun(id: string): Promise<Run | undefined>;
   /** In the order they were made. */
   listRuns(query?: { states?: readonly RunState[]; sessionId?: string; agentId?: string }): Promise<Run[]>;
-  /** Compare-and-set on `version`; undefined when it changed meanwhile, or would be a second working run of its agent or a second open run of its session. */
+  /** Compare-and-set on `version`; undefined when it changed meanwhile, or would be a second open run of its session. */
   updateRun(id: string, version: number, changes: RunChanges): Promise<Run | undefined>;
-  /** Queued → working at `now`, its slice starting; undefined when another claim won or its agent already has a working run. */
+  /** Queued → working at `now`, its slice starting; undefined when another claim won or its agent's working runs are at its cap of active sessions (requirement 0004). */
   claim(id: string, now: Date): Promise<Run | undefined>;
 
   /** Stored before the next; a step's number is unique in its run. */
@@ -240,24 +246,27 @@ const rank = (run: Run) => (run.priority === null ? 3 : PRIORITY_RANK[run.priori
 /**
  * The runs to hand to the runner now (requirement 0001, RN2): queued for
  * now or earlier (a run waiting on a service's task is queued for its next
- * poll), by priority, then due date (none last), then the oldest; one per
- * agent, and none for an agent that has a working run.
+ * poll), by priority, then due date (none last), then the oldest (a tie in
+ * the order given, `listRuns`' order of making); per
+ * agent as many as its cap of active sessions leaves beside its working
+ * runs (requirement 0004).
  */
-export function dueRuns(runs: readonly Run[], now: Date): Run[] {
-  const busy = new Set(runs.filter((run) => run.state === "working").map((run) => run.agentId));
+export function dueRuns(runs: readonly Run[], now: Date, capOf: (agentId: string) => number): Run[] {
+  const active = new Map<string, number>();
+  for (const run of runs) if (run.state === "working") active.set(run.agentId, (active.get(run.agentId) ?? 0) + 1);
   const queued = runs
     .filter((run) => run.state === "queued" && Date.parse(run.queuedAt) <= now.getTime())
     .sort(
       (a, b) =>
         rank(a) - rank(b) ||
         (a.dueOn ?? "9999-12-31").localeCompare(b.dueOn ?? "9999-12-31") ||
-        a.queuedAt.localeCompare(b.queuedAt) ||
-        a.id.localeCompare(b.id),
+        a.queuedAt.localeCompare(b.queuedAt),
     );
   const picked: Run[] = [];
   for (const run of queued) {
-    if (busy.has(run.agentId)) continue;
-    busy.add(run.agentId);
+    const count = active.get(run.agentId) ?? 0;
+    if (count >= capOf(run.agentId)) continue;
+    active.set(run.agentId, count + 1);
     picked.push(run);
   }
   return picked;
@@ -296,7 +305,7 @@ const isUniqueViolation = (error: unknown) => typeof error === "object" && error
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const json = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
 
-const SESSION_COLUMNS = "id, team_id, agent_id, state, close_reason, owner_user_ids, started_by_user_id, created_at, updated_at, last_activity_at, closed_at, version";
+const SESSION_COLUMNS = "id, team_id, agent_id, state, close_reason, owner_user_ids, started_by_user_id, created_at, updated_at, last_activity_at, closed_at, close_after_run, version";
 const RUN_COLUMNS = `id, team_id, session_id, agent_id, state, cause, priority, due_on, queued_at, claimed_at, slice_started_at, ended_at, stop_reason, model,
   steps, input_tokens, output_tokens, injection_suspected, read_versions, waiting_on, cache_until, transcript, summary, result, version`;
 const TRIGGER_COLUMNS = "id, team_id, session_id, agent_id, sender, user_id, event, reference, body, received_at, run_id";
@@ -314,6 +323,7 @@ const sessionOf = (row: Row): Session => ({
   updatedAt: iso(row["updated_at"])!,
   lastActivityAt: iso(row["last_activity_at"])!,
   closedAt: iso(row["closed_at"]),
+  closeAfterRun: row["close_after_run"] as boolean,
   version: Number(row["version"]),
 });
 
@@ -448,7 +458,7 @@ class PostgresTeamRunStore implements TeamRunStore {
 
   async insertSession(value: Session) {
     await this.tx((tx) =>
-      tx.query(`INSERT INTO sessions (${SESSION_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`, [
+      tx.query(`INSERT INTO sessions (${SESSION_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [
         value.id,
         this.teamId,
         value.agentId,
@@ -460,6 +470,7 @@ class PostgresTeamRunStore implements TeamRunStore {
         value.updatedAt,
         value.lastActivityAt,
         value.closedAt,
+        value.closeAfterRun,
         value.version,
       ]),
     );
@@ -502,6 +513,28 @@ class PostgresTeamRunStore implements TeamRunStore {
   async touchSession(id: string, at: string) {
     if (!UUID.test(id)) return;
     await this.tx((tx) => tx.query("UPDATE sessions SET last_activity_at = GREATEST(last_activity_at, $3) WHERE team_id = $1 AND id = $2 AND state = 'open'", [this.teamId, id, at]));
+  }
+
+  async closeAfterRun(id: string) {
+    if (!UUID.test(id)) return false;
+    const { rows } = await this.tx((tx) =>
+      tx.query("UPDATE sessions SET close_after_run = true, version = version + 1 WHERE team_id = $1 AND id = $2 AND state = 'open' RETURNING id", [this.teamId, id]),
+    );
+    return rows.length === 1;
+  }
+
+  async closeFinishedSessions(at: Date) {
+    const { rows } = await this.tx((tx) =>
+      tx.query(
+        `UPDATE sessions s SET state = 'closed', close_reason = 'closed', closed_at = $2, updated_at = $2, version = version + 1
+         WHERE s.team_id = $1 AND s.state = 'open' AND s.close_after_run
+           AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.team_id = $1 AND r.session_id = s.id AND r.state IN ('queued', 'working', 'input_required', 'auth_required'))
+           AND NOT EXISTS (SELECT 1 FROM triggers t WHERE t.team_id = $1 AND t.session_id = s.id AND t.run_id IS NULL)
+         RETURNING s.id`,
+        [this.teamId, at.toISOString()],
+      ),
+    );
+    return rows.length;
   }
 
   async insertTrigger(value: Trigger): Promise<{ stored: "ok" } | { stored: "exists"; trigger: Trigger }> {
@@ -607,19 +640,21 @@ class PostgresTeamRunStore implements TeamRunStore {
 
   async claim(id: string, now: Date) {
     if (!UUID.test(id)) return undefined;
-    try {
-      const { rows } = await this.tx((tx) =>
-        tx.query<Row>(
-          `UPDATE runs SET state = 'working', claimed_at = $3, slice_started_at = $3, version = version + 1
-           WHERE team_id = $1 AND id = $2 AND state = 'queued' RETURNING ${RUN_COLUMNS}`,
-          [this.teamId, id, now.toISOString()],
-        ),
+    return this.tx(async (tx) => {
+      const queued = (await tx.query<{ agent_id: string }>("SELECT agent_id FROM runs WHERE team_id = $1 AND id = $2 AND state = 'queued'", [this.teamId, id])).rows[0];
+      if (!queued) return undefined;
+      // One claim per agent at a time: the count below then sees every working run committed before it.
+      await tx.query("SELECT 1 FROM agents WHERE team_id = $1 AND id = $2 FOR UPDATE", [this.teamId, queued.agent_id]);
+      const { rows } = await tx.query<Row>(
+        `UPDATE runs SET state = 'working', claimed_at = $3, slice_started_at = $3, version = version + 1
+         WHERE team_id = $1 AND id = $2 AND state = 'queued'
+           AND (SELECT count(*) FROM runs w WHERE w.team_id = $1 AND w.agent_id = $4 AND w.state = 'working')
+             < (SELECT a.max_active_sessions FROM agents a WHERE a.team_id = $1 AND a.id = $4)
+         RETURNING ${RUN_COLUMNS}`,
+        [this.teamId, id, now.toISOString(), queued.agent_id],
       );
       return rows[0] && runOf(rows[0]);
-    } catch (error) {
-      if (isUniqueViolation(error)) return undefined;
-      throw error;
-    }
+    });
   }
 
   async insertStep(step: Step) {

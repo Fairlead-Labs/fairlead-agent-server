@@ -185,6 +185,7 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
     if (priority !== undefined && priority !== "low" && priority !== "medium" && priority !== "high") return c.json({ error: "Invalid request" }, 400);
     if (given["sessionId"] !== undefined && typeof given["sessionId"] !== "string") return c.json({ error: "Invalid request" }, 400);
     if (given["dueOn"] !== undefined && typeof given["dueOn"] !== "string") return c.json({ error: "Invalid request" }, 400);
+    if (given["close"] !== undefined && typeof given["close"] !== "boolean") return c.json({ error: "Invalid request" }, 400);
     const result = await work.receive({
       teamId: given["teamId"],
       agentId: given["agentId"],
@@ -197,6 +198,7 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
       ...(owners !== undefined ? { ownerUserIds: owners as string[] } : {}),
       ...(priority !== undefined ? { priority } : {}),
       ...(typeof given["dueOn"] === "string" ? { dueOn: given["dueOn"] } : {}),
+      ...(given["close"] === true ? { close: true } : {}),
     });
     return c.json(result, result.duplicate ? 200 : 202);
   });
