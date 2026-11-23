@@ -50,6 +50,15 @@
 - **Others' work for a personal agent.** Another member may start work for
   someone's personal agent, as a request: the session's owner stays the
   agent's owner, so its questions go to the person who knows the agent.
+- **Active sessions at most.** Each agent holds a cap of sessions active
+  at once (`maxActiveSessions`, 1 to 100, default 3), read with its
+  settings and changed by whoever edits the agent: a team agent's team
+  admins, a personal agent's owner. A session is active while its run is
+  `working`; a session waiting on a person (`input_required`,
+  `auth_required`), an idle one and a closed one do not count, so an
+  agent may hold more open sessions than its cap. The cap is stored and
+  shown; enforcing it (a run beyond it waits as `queued` until one of the
+  agent's runs stops working) is not built yet.
 - **Safety controls.** A team admin may stop or pause any agent of the
   team, a personal one included. Editing a personal agent stays its
   owner's.
@@ -193,6 +202,7 @@ review.
 - A team's task service and memory connection, and coordinators
   ([requirement 0005](0005-coordinators-and-memory.md)).
 - Usage limits per team, agent and user.
+- Enforcing an agent's cap of active sessions (`maxActiveSessions`).
 - Owners correcting a session's summary (they read it today).
 - Trigger senders with a credential for one team, and a webhook per team.
 - Delivering webhook events through an outbox: today an event is tried
@@ -218,6 +228,7 @@ the services with the fake MCP server over real HTTP.
 | AS10 | Triggers are delivered to one run, in order; a session closes after 7 days idle only without an open run; usage adds up per day, agent and user; the hourly pass purges old transcripts and closes idle sessions | `test/stores.test.ts`, `test/runner.test.ts` |
 | AS11 | Usage per team for its admins; an installation admin sees each team's totals, never its sessions | `test/server/api.test.ts` |
 | AS12 | The host webhook: each event POSTed signed by Standard Webhooks, a failed delivery tried again, three times in all; with an identity, each delivery carries a fresh token instead of a signature | `test/notify.test.ts` |
+| AS13 | A new agent's cap of active sessions is 3; a team admin changes a team agent's, its owner a personal agent's, on creating or by `PATCH`. Negative: a member who is neither 403; below 1, above 100 or not an integer 400, nothing changed | `test/server/api.test.ts` |
 | CN1 | The MCP client speaks the current revision first: no `initialize`, the revision, client and capabilities in `_meta`, the routing headers, JSON or an event stream | `test/mcp.test.ts` |
 | CN2 | A service that speaks only the older revision is initialized and its session kept; a forgotten session is begun again; the revision is recorded | `test/mcp.test.ts` |
 | CN3 | A held call answers a task, polled with `tasks/get` to its result or its failure; a service's JSON-RPC error is its refusal; no token is 401 with the challenge | `test/mcp.test.ts` |

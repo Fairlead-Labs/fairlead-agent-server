@@ -91,9 +91,25 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 | Variable | What |
 | --- | --- |
+| `CORS_ORIGINS` | Comma-separated origins whose browsers may call the API, each `https://host[:port]` without a path (http only on loopback). Their preflights are answered; any other origin gets no CORS header. Unset, none. |
 | `TEAM_IDENTITY_PROJECT` | The Google Cloud project holding a service account per team, for model accounts reached by identity (Vertex AI, Bedrock, Azure) and not by API key. Unset, only API-key profiles run. |
 | `AWS_STS_AUDIENCE` | The audience for AWS STS, default `sts.amazonaws.com`. |
 | `KMS_ENDPOINT`, `GCE_METADATA_HOST` | Other addresses for Cloud KMS and the metadata server, for tests. |
+
+## A host on the same database
+
+A host sharing the database reads two views in `agent_server`, and nothing
+else of the schema ([ADR 0006](adr/0006-the-host.md) §5). Grant its role
+`USAGE` on the schema and `SELECT` on the views it needs:
+
+| View | Columns |
+| --- | --- |
+| `host_runs` | `id`, `team_id`, `agent_id`, `state`, `slice_ends_at` (null while the run holds no slice), `step_id` (its latest step, the one a call in progress names) |
+| `host_agents` | `id`, `team_id`, `owner_user_id` (null for a team agent), `removed_at` |
+
+A host that boots the server in its own tests imports `createServer` from
+the package export `./server`: the API and the runner wired as the entry
+point wires them, from options instead of the environment.
 
 ## A first run with a Claude API key
 

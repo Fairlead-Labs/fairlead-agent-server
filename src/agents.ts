@@ -21,6 +21,9 @@ export interface RunLimits {
 
 /** A new agent's limits: 30 steps and 300,000 input tokens per run, 10 runs per piece of work. */
 export const DEFAULT_LIMITS: RunLimits = { steps: 30, inputTokens: 300_000, runsPerTrigger: 10 };
+/** A new agent's cap of active sessions, and the range it may be set in. */
+export const DEFAULT_MAX_ACTIVE_SESSIONS = 3;
+export const MAX_ACTIVE_SESSIONS_RANGE: [number, number] = [1, 100];
 export const LIMIT_RANGES: Record<keyof RunLimits, [number, number]> = { steps: [1, 500], inputTokens: [1_000, 10_000_000], runsPerTrigger: [1, 100] };
 
 export interface Agent {
@@ -41,13 +44,15 @@ export interface Agent {
   timeZone: string;
   language: "en" | "de";
   paused: boolean;
+  /** Sessions it may hold open at once (1–100, default 3); enforcement is a later step (requirement 0004). */
+  maxActiveSessions: number;
   createdAt: string;
   updatedAt: string;
   removedAt: string | null;
   version: number;
 }
 
-export type AgentChanges = Partial<Pick<Agent, "name" | "description" | "profileId" | "askOwners" | "limits" | "playbook" | "defaultOwnerUserIds" | "timeZone" | "language" | "paused" | "removedAt" | "updatedAt">>;
+export type AgentChanges = Partial<Pick<Agent, "name" | "description" | "profileId" | "askOwners" | "limits" | "playbook" | "defaultOwnerUserIds" | "timeZone" | "language" | "paused" | "maxActiveSessions" | "removedAt" | "updatedAt">>;
 export type ProfileChanges = Partial<Pick<Profile, keyof ProfileSettings | "apiKey" | "updatedAt">>;
 
 /** The agent's model, opened (an API key unsealed). */
@@ -86,7 +91,7 @@ const code = (error: unknown) => (typeof error === "object" && error !== null ? 
 const json = (value: unknown) => (value === null || value === undefined ? null : JSON.stringify(value));
 
 const AGENT_COLUMNS =
-  "id, team_id, name, description, owner_user_id, profile_id, ask_owners, limits, playbook, default_owner_user_ids, time_zone, language, paused, created_at, updated_at, removed_at, version";
+  "id, team_id, name, description, owner_user_id, profile_id, ask_owners, limits, playbook, default_owner_user_ids, time_zone, language, paused, max_active_sessions, created_at, updated_at, removed_at, version";
 const PROFILE_COLUMNS = "id, team_id, owner_user_id, doc, api_key, created_at, updated_at, version";
 
 const agentOf = (row: Row): Agent => ({
@@ -103,6 +108,7 @@ const agentOf = (row: Row): Agent => ({
   timeZone: row["time_zone"] as string,
   language: row["language"] as Agent["language"],
   paused: row["paused"] as boolean,
+  maxActiveSessions: Number(row["max_active_sessions"]),
   createdAt: iso(row["created_at"])!,
   updatedAt: iso(row["updated_at"])!,
   removedAt: iso(row["removed_at"]),
@@ -135,6 +141,7 @@ const AGENT_FIELDS: Record<keyof AgentChanges, [string, (value: unknown) => unkn
   timeZone: ["time_zone", (v) => v],
   language: ["language", (v) => v],
   paused: ["paused", (v) => v],
+  maxActiveSessions: ["max_active_sessions", (v) => v],
   removedAt: ["removed_at", (v) => v],
   updatedAt: ["updated_at", (v) => v],
 };
@@ -171,7 +178,7 @@ class PostgresTeamAgents implements TeamAgentStore {
   async insertAgent(a: Agent) {
     try {
       await this.tx((tx) =>
-        tx.query(`INSERT INTO agents (${AGENT_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`, [
+        tx.query(`INSERT INTO agents (${AGENT_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`, [
           a.id,
           this.teamId,
           a.name,
@@ -185,6 +192,7 @@ class PostgresTeamAgents implements TeamAgentStore {
           a.timeZone,
           a.language,
           a.paused,
+          a.maxActiveSessions,
           a.createdAt,
           a.updatedAt,
           a.removedAt,

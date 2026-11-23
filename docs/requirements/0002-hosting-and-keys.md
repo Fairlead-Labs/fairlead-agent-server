@@ -30,6 +30,13 @@ scheduler in the same process.
   ledger of its own ([requirement 0003](0003-directory.md)); nothing goes
   in `public`, so another product's tables there, of any name, are left
   alone. Every connection sets its search path to `agent_server`.
+- **Browsers.** `CORS_ORIGINS` names the origins whose browsers may call
+  the API (https, http only on loopback, no path). A preflight from one of
+  them is answered before any sign-in, for the agents' API and the
+  directory's alike; another origin gets no CORS header. Unset, none.
+- **Booting it from a host's tests.** The package export `./server`
+  (`createServer`) wires the API and the runner as the entry point does,
+  from options, reading no environment; the entry point calls it.
 
 ## Sign-in to the host connection
 
@@ -48,6 +55,12 @@ scheduler in the same process.
   six columns, no content). A step id finds a cut-off call's outcome in the
   host's record of calls (the `RunCallLog` port; no adapter is built yet,
   so a cut-off write is a runner question).
+- **A host on the same database** reads the run in the view
+  `agent_server.host_runs` instead: `id`, `team_id`, `agent_id`, `state`,
+  `slice_ends_at`, `step_id` (the run's latest step), no content; and an
+  agent in `agent_server.host_agents`: `id`, `team_id`, `owner_user_id`,
+  `removed_at` ([ADR 0006](../adr/0006-the-host.md) §5). The installation
+  grants its role those views alone.
 - **What a compromised server holds.** It can act as the agents of the runs
   it works right now at the host, within their grants and slices, and as
   any agent at a team's own connection, within that agent's credential.
@@ -99,6 +112,9 @@ work sent twice is done once, and one failing run does not stop the rest.
 | HK6 | Negative: both ways configured for one choice (the wrapping key; the host's MCP sign-in, trigger sign-in or webhook signature), or neither where one is required, stops the start; a way without its URL stops it | `test/server/startup-config.test.ts` |
 | HK11 | The database is migrated at the start, each migration once and recorded; the server starts with no host at all. Negative: a migration changed after it was applied, an unknown one or a failing one stops it and changes nothing; a database that cannot be reached stops the start, its URL never echoed | `test/migrations.test.ts`, `test/server/startup-config.test.ts` |
 | HK12 | The server's tables and ledger are in the schema `agent_server`, the directory's in `directory`, each connection finding the server's own. Negative: another product's tables in `public`, `agents` and `schema_migrations` among them, are neither read nor changed | `test/migrations.test.ts`, `test/server/startup-config.test.ts` |
+| HK13 | `CORS_ORIGINS`' origins get their preflights answered and their calls' `Access-Control-Allow-Origin`, on the agents' API and the directory's. Negative: another origin, or any while none is configured, gets no CORS header; a value that is not https (http only on loopback), has a path, a query or an empty entry, or is not a URL stops the start, never echoed | `test/server/api.test.ts`, `test/server/startup-config.test.ts` |
+| HK14 | The host views list exactly their columns: `host_runs` id, team, agent, state, slice end, latest step; `host_agents` id, team, owner, removed; read across teams. Negative: no content column; a role granted only the views reads no table of the schema | `test/migrations.test.ts` |
+| HK15 | The package export `./server` boots the server from options (health, CORS, sign-in, agents, the host's trigger worked to its end), reading no environment | `test/server/server-export.test.ts` |
 | HK7 | A team's first seal makes its key, wrapped under an AAD naming team and key; later seals and other processes reuse it; two first seals at once store one key. Negative: a value opens only for its team and purpose, untouched, under its key; a wrapped key moved to another team's row does not unwrap; a refusing key service leaves nothing stored or sealed | `test/keys.test.ts`, `test/server/startup-config.test.ts` |
 | HK8 | `KeyWrapper` is the only thing the sealer knows of a key service; Cloud KMS is one adapter | `test/keys.test.ts` |
 | HK9 | A local key is another: no service is called, and another process with the same key opens what one sealed | `test/keys.test.ts` |

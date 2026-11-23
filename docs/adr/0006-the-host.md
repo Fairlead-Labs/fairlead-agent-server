@@ -42,6 +42,14 @@ installation already knows.
 4. **A host is optional.** Without one the server runs on its own: people
    start sessions through the API, and teams configure their own
    connections.
+5. **A host on the same database reads two views, nothing else.** The
+   server's migrations add `agent_server.host_runs` (a run's id, team,
+   agent, state, slice end and latest step: what admitting a call as the
+   run takes) and `agent_server.host_agents` (an agent's id, team, owner
+   and removal). The installation grants the host's role `SELECT` on them
+   alone. A view reads as its owner, so across teams, and holds no content
+   column: no transcript, summary, question or setting. The host reads the
+   current row at every check, with no cache and no call to the server.
 
 ## Rejected
 
@@ -50,6 +58,11 @@ installation already knows.
 - **The host's connection configured by each team:** a team admin choosing
   the address would receive the server's own token. The host connection's
   address is the installation's.
+- **A read of runs and agents over HTTP:** a credential and an endpoint for
+  what the shared database already answers, and a cache whose staleness
+  would admit a stopped run.
+- **Grants on the tables themselves:** the host would read transcripts,
+  sealed or not, and every setting; row-level security cannot hide columns.
 - **A host that may also manage teams or answer questions:** it would be a
   credential that manages every team. People manage and answer with their
   own sign-in.
@@ -61,3 +74,5 @@ installation already knows.
   changed, so the configuration reference recommends the identity.
 - The host webhook receives every team's question texts: it is for a
   product the installation trusts with them.
+- The views are a contract: their columns change only by a new migration,
+  and a host's checks follow.
