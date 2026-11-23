@@ -41,6 +41,7 @@ export function newAgent(teamId: string, overrides: Partial<Agent> = {}): Agent 
     timeZone: "UTC",
     language: "en",
     paused: false,
+    maxActiveSessions: 3,
     createdAt: T0,
     updatedAt: T0,
     removedAt: null,

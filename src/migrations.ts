@@ -242,10 +242,33 @@ const SERVER: readonly string[] = [
   ...rls("usage"),
 ];
 
+/**
+ * A host on the same database (ADR 0006) reads two views, each granted to
+ * it alone by the installation: `host_runs`, what admitting a run's call
+ * takes (its slice's end, `RUN_SLICE_MS` after its claim, and its latest
+ * step), and `host_agents`, whether
+ * an agent exists, where, whose, and whether it was removed. Neither has a
+ * content column. A view reads as its owner, so across teams: the one
+ * crossing a host has, and the reason they hold nothing more.
+ */
+const HOST: readonly string[] = [
+  // An agent's cap of active sessions (requirement 0004).
+  `ALTER TABLE agents ADD COLUMN max_active_sessions integer NOT NULL DEFAULT 3 CHECK (max_active_sessions BETWEEN 1 AND 100)`,
+  `CREATE VIEW host_runs AS
+        SELECT r.id, r.team_id, r.agent_id, r.state,
+               r.slice_started_at + interval '15 minutes' AS slice_ends_at,
+               (SELECT s.id FROM steps s WHERE s.run_id = r.id ORDER BY s.n DESC LIMIT 1) AS step_id
+          FROM runs r`,
+  `CREATE VIEW host_agents AS SELECT id, team_id, owner_user_id, removed_at FROM agents`,
+];
+
 /** The schema of the server's own tables; its connections search it first (`search_path`). */
 export const SERVER_SCHEMA = "agent_server";
 
-export const MIGRATIONS: readonly Migration[] = [{ name: "0001-server", statements: SERVER }];
+export const MIGRATIONS: readonly Migration[] = [
+  { name: "0001-server", statements: SERVER },
+  { name: "0002-host-views-active-sessions", statements: HOST },
+];
 
 /** Brings the database to this version's tables: the directory, then the server's own. Answers the names applied now. */
 export async function migrateDatabase(db: TransactionalSqlDatabase): Promise<string[]> {

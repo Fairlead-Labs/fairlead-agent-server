@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
-import { DEFAULT_LIMITS, LIMIT_RANGES, mayUseProfile, UnknownProfileError, type Agent, type AgentChanges, type AgentStore, type RunLimits } from "../agents.js";
+import { cors } from "hono/cors";
+import { DEFAULT_LIMITS, DEFAULT_MAX_ACTIVE_SESSIONS, LIMIT_RANGES, MAX_ACTIVE_SESSIONS_RANGE, mayUseProfile, UnknownProfileError, type Agent, type AgentChanges, type AgentStore, type RunLimits } from "../agents.js";
 import { CONNECTION_NAME, type AgentCredential, type Connection, type ConnectionStore, type OAuthGrant } from "../connections.js";
 import type { Directory, DirectoryUser } from "../directory/index.js";
 import { isSecureUrl } from "../google.js";
@@ -35,6 +36,8 @@ export interface ApiDependencies {
   senders: TriggerSenders;
   /** This server's public address, for the OAuth callback and its client ID metadata document. */
   publicUrl: string;
+  /** Origins whose browsers may call (requirement 0002, HK13); none by default. */
+  corsOrigins?: readonly string[];
   now?: () => Date;
   fetch?: typeof fetch;
 }
@@ -122,6 +125,7 @@ const agentView = (a: Agent) => ({
   timeZone: a.timeZone,
   language: a.language,
   paused: a.paused,
+  maxActiveSessions: a.maxActiveSessions,
   createdAt: a.createdAt,
   updatedAt: a.updatedAt,
   version: a.version,
@@ -150,6 +154,11 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
   const redirectUri = `${deps.publicUrl}/oauth/callback`;
   const metadataUrl = `${deps.publicUrl}/oauth/client-metadata.json`;
   const app = new Hono<Env>();
+
+  // First, before any sign-in: a configured origin's preflight is answered; any other origin gets no CORS header.
+  const origins = new Set(deps.corsOrigins ?? []);
+  const corsFor = cors({ origin: [...origins], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"], allowHeaders: ["Authorization", "Content-Type"], maxAge: 600 });
+  if (origins.size > 0) app.use((c, next) => (origins.has(c.req.header("Origin") ?? "") ? corsFor(c, next) : next()));
 
   app.onError((error, c) => {
     if (error instanceof Invalid) return c.json({ error: "Invalid request" }, 400);
@@ -308,6 +317,7 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
       timeZone: "UTC",
       language: "en",
       paused: false,
+      maxActiveSessions: DEFAULT_MAX_ACTIVE_SESSIONS,
       createdAt: stamp,
       updatedAt: stamp,
       removedAt: null,
@@ -358,6 +368,12 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
     if ("language" in given) {
       check(given["language"] === "en" || given["language"] === "de");
       changes.language = given["language"] as Agent["language"];
+    }
+    if ("maxActiveSessions" in given) {
+      const [min, max] = MAX_ACTIVE_SESSIONS_RANGE;
+      const cap = given["maxActiveSessions"];
+      check(Number.isInteger(cap) && (cap as number) >= min && (cap as number) <= max);
+      changes.maxActiveSessions = cap as number;
     }
     return changes;
   }

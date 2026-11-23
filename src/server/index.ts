@@ -1,36 +1,13 @@
 import { serve } from "@hono/node-server";
 import pg from "pg";
-import { Hono } from "hono";
 import { CLOUD_KMS_URL, isSecureUrl, KMS_CRYPTO_KEY_PATTERN, metadataAccessToken, metadataIdentityToken } from "../google.js";
 import { poolDatabase } from "../db/sql-database.js";
-import {
-  cloudKmsKeyWrapper,
-  createRunner,
-  createTeamIdentity,
-  createTeamSealer,
-  createToolHub,
-  createWebhookNotifier,
-  localKeyWrapper,
-  migrateDatabase,
-  SERVER_SCHEMA,
-  noNotifier,
-  PostgresAgentStore,
-  PostgresConnectionStore,
-  PostgresRunStore,
-  PostgresTeamKeyStore,
-  WEBHOOK_SECRET,
-  type TeamIdentity,
-} from "../index.js";
-import { createDirectory } from "../directory/index.js";
-import { createScheduler } from "../scheduler.js";
-import { createWork } from "../work.js";
-import { createApiApp } from "./api.js";
-import { createDirectoryApp } from "./directory-api.js";
-import { createOidcVerifier } from "./oidc.js";
+import { cloudKmsKeyWrapper, createTeamIdentity, createWebhookNotifier, localKeyWrapper, migrateDatabase, SERVER_SCHEMA, WEBHOOK_SECRET } from "../index.js";
+import { createServer } from "./server.js";
 import { hostIdentitySender, hostTokenSender, noSenders } from "./senders.js";
 
 /**
- * The entry point (requirement 0002, HK2–HK7):
+ * The entry point (requirement 0002, HK2–HK7, HK13):
  * the one place the environment is read. A missing or malformed value stops
  * the start, naming the variable and never echoing a value. Nothing here
  * requires a cloud provider: each of the two choices below has a portable
@@ -53,6 +30,8 @@ import { hostIdentitySender, hostTokenSender, noSenders } from "./senders.js";
  *   HOST_AUDIENCE naming HOST_SUBJECT; HOST_WEBHOOK_URL, told of
  *   the work, signed with HOST_WEBHOOK_SECRET (`whsec_…`) or
  *   HOST_WEBHOOK_AUDIENCE (a Google identity token).
+ * - CORS_ORIGINS (optional): comma-separated https origins whose browsers
+ *   may call the API (http only on loopback); none by default.
  * The database is migrated at every start.
  * - TEAM_IDENTITY_PROJECT (optional): the Google Cloud project
  *   holding each team's service account (`ag-<27 hex>@…`), which this
@@ -130,6 +109,17 @@ if (teamCreation !== "users" && teamCreation !== "admins") fail("TEAM_CREATION m
 const port = Number(env["PORT"] ?? 3000);
 if (!Number.isInteger(port) || port < 0 || port > 65_535) fail("PORT must be a port number");
 
+const corsOrigins = (env["CORS_ORIGINS"] ?? "").trim() === "" ? [] : env["CORS_ORIGINS"]!.split(",").map((entry) => entry.trim());
+for (const origin of corsOrigins) {
+  let exact = false;
+  try {
+    exact = isSecureUrl(origin) && new URL(origin).origin === origin;
+  } catch {
+    // not a URL
+  }
+  if (!exact) fail("CORS_ORIGINS must be comma-separated https origins (http only on loopback), each without a path");
+}
+
 const metadataHost = env["GCE_METADATA_HOST"];
 const metadata = metadataHost ? { baseUrl: `http://${metadataHost}` } : {};
 // Connections open at the first query, the server's own schema first in their search path.
@@ -137,42 +127,28 @@ const pool = new pg.Pool({ connectionString: databaseUrl, max: Number(env["DATAB
 // Queued before the connection's first query; a failure fails that query.
 pool.on("connect", (client) => void client.query(`SET search_path TO ${SERVER_SCHEMA}`).catch(() => undefined));
 const db = poolDatabase(pool);
-const store = new PostgresRunStore(db);
-const agents = new PostgresAgentStore(db);
-const connections = new PostgresConnectionStore(db);
-const directory = createDirectory(db);
-const sealer = createTeamSealer({
-  store: new PostgresTeamKeyStore(db),
-  wrapper: localKey
+const tokenFor = (way: { google: string } | { portable: string }) => ("portable" in way ? async () => way.portable : metadataIdentityToken(way.google, metadata));
+const { app, scheduler } = createServer({
+  db,
+  keyWrapper: localKey
     ? localKeyWrapper(localKey)
     : cloudKmsKeyWrapper({ cryptoKey: (keyChoice as { google: string }).google, accessToken: metadataAccessToken(metadata), baseUrl: env["KMS_ENDPOINT"] || CLOUD_KMS_URL }),
+  publicUrl,
+  oidc: { issuer: oidcIssuer, audience: oidcAudience, rolesClaim, adminRole },
+  teamCreation,
+  corsOrigins,
+  ...(hostMcp ? { hostMcp: { url: hostMcp.url, token: tokenFor(hostMcp.way) } } : {}),
+  senders: hostToken !== undefined ? hostTokenSender(hostToken) : hostIssuer !== undefined ? hostIdentitySender({ issuer: hostIssuer, audience: word("HOST_AUDIENCE"), subject: word("HOST_SUBJECT") }) : noSenders,
+  ...(hostWebhook
+    ? { notifier: createWebhookNotifier({ url: hostWebhook.url, ...("portable" in hostWebhook.way ? { secret: hostWebhook.way.portable } : { token: tokenFor(hostWebhook.way) }) }) }
+    : {}),
+  ...(identityProject !== undefined ? { identity: createTeamIdentity({ project: identityProject, runnerToken: metadataAccessToken(metadata), ...(awsAudience ? { awsAudience } : {}) }) } : {}),
 });
-const noIdentity = () => Promise.reject(new Error("No team identity configured (TEAM_IDENTITY_PROJECT)"));
-const identity: TeamIdentity =
-  identityProject === undefined
-    ? { googleAccessToken: noIdentity, awsCredentials: noIdentity, azureAccessToken: noIdentity }
-    : createTeamIdentity({ project: identityProject, runnerToken: metadataAccessToken(metadata), ...(awsAudience ? { awsAudience } : {}) });
-const tokenFor = (way: { google: string } | { portable: string }) => ("portable" in way ? async () => way.portable : metadataIdentityToken(way.google, metadata));
-const tools = createToolHub({ host: hostMcp && { url: hostMcp.url, token: tokenFor(hostMcp.way) }, connections, sealer });
-const notifier = hostWebhook
-  ? createWebhookNotifier({ url: hostWebhook.url, ...("portable" in hostWebhook.way ? { secret: hostWebhook.way.portable } : { token: tokenFor(hostWebhook.way) }) })
-  : noNotifier;
-const senders =
-  hostToken !== undefined ? hostTokenSender(hostToken) : hostIssuer !== undefined ? hostIdentitySender({ issuer: hostIssuer, audience: word("HOST_AUDIENCE"), subject: word("HOST_SUBJECT") }) : noSenders;
-const runner = createRunner({ store, agents, directory, sealer, tools, identity, notifier });
-const work = createWork({ store, agents, directory, sealer, notifier });
-const scheduler = createScheduler({ store, agents, directory, runner });
-const verify = createOidcVerifier({ issuer: oidcIssuer, audience: oidcAudience, rolesClaim, adminRole });
-
-const app = new Hono();
-app.get("/health", (c) => c.json({ status: "ok", service: "fairlead-agent-server" }));
-// After the health check: the host's triggers and the OAuth callback, then a signed-in user's calls (requirements 0003, 0004).
-app.route("/", createApiApp({ directory, verify, store, agents, connections, sealer, work, senders, publicUrl }));
-app.route("/", createDirectoryApp({ directory, verify, teamCreation }));
 
 await migrateDatabase(db).catch((error: unknown) => fail(`the database could not be migrated (${error instanceof Error ? error.name : "error"})`));
 console.log(`fairlead-agent-server: users sign in at ${oidcIssuer}; teams are created by ${teamCreation}; teams' keys wrapped by ${localKey ? "a local key" : "Cloud KMS"}`);
 console.log(`fairlead-agent-server: host tools ${hostMcp ? `at ${hostMcp.url}` : "none"}; host triggers ${hostToken ? "by a bearer token" : hostIssuer ? `by tokens of ${hostIssuer}` : "none"}; host webhook ${hostWebhook ? hostWebhook.url : "none"}`);
+console.log(`fairlead-agent-server: browsers from ${corsOrigins.length} origins may call`);
 console.log(identityProject === undefined ? "fairlead-agent-server: no team identities (no TEAM_IDENTITY_PROJECT): API-key profiles only" : `fairlead-agent-server: team identities in ${identityProject}`);
 scheduler.start();
 serve({ fetch: app.fetch, port }, (info) => console.log(`fairlead-agent-server listening on port ${info.port}`));

@@ -29,9 +29,9 @@ built yet*).
 | `src/keys.ts` | A key per team, sealing transcripts, summaries and model keys; wrapped by a key service (Cloud KMS) or a local key |
 | `src/prompt.ts`, `playbooks/` | The system prompt and the playbooks, English and German |
 | `src/directory/` | Users, teams, members, invitations and join codes, in the Postgres schema `directory` that another product may share |
-| `src/migrations.ts`, `src/db/` | The tables with row-level security on `team_id`, applied at every start; the SQL port, transactions, team scoping |
+| `src/migrations.ts`, `src/db/` | The tables with row-level security on `team_id`, applied at every start, and the two read-only views for a host on the same database; the SQL port, transactions, team scoping |
 | `src/google.ts` | Google Cloud over `fetch`: Cloud KMS, the metadata server's tokens |
-| `src/server/` | The HTTP entry point, the only place that reads the environment; sign-in by an OIDC provider's token, the directory's API, the API for agents, sessions and connections, the host's triggers |
+| `src/server/` | The HTTP entry point, the only place that reads the environment; `server.ts`, the server wired from options (the package export `./server`, for a host's tests); sign-in by an OIDC provider's token, the directory's API, the API for agents, sessions and connections, the host's triggers |
 | `src/testing/` | Fake Anthropic, OpenAI, MCP, identity, federation, KMS and OIDC servers (real HTTP on loopback) |
 | `Dockerfile`, `docs/configuration.md` | The container and everything it is configured with |
 

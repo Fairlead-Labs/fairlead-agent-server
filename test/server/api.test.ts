@@ -23,10 +23,10 @@ let issuer: FakeOidcIssuer;
 let app: Hono;
 let services: FakeMcp[] = [];
 
-const appWith = (senders: TriggerSenders) => {
+const appWith = (senders: TriggerSenders, corsOrigins?: string[]) => {
   const verify = createOidcVerifier({ issuer: issuer.url, audience: AUDIENCE, rolesClaim: "groups", adminRole: "agent-server-admin" });
   const composed = new Hono();
-  composed.route("/", createApiApp({ directory: w.directory, verify, store: w.store, agents: w.agents, connections: w.connections, sealer: w.sealer, work: w.work, senders, publicUrl: PUBLIC_URL, now: () => w.at }));
+  composed.route("/", createApiApp({ directory: w.directory, verify, store: w.store, agents: w.agents, connections: w.connections, sealer: w.sealer, work: w.work, senders, publicUrl: PUBLIC_URL, now: () => w.at, ...(corsOrigins ? { corsOrigins } : {}) }));
   composed.route("/", createDirectoryApp({ directory: w.directory, verify, teamCreation: "users" }));
   return composed;
 };
@@ -179,6 +179,74 @@ describe("managing agents, profiles and connections (requirement 0004)", () => {
     expect((await request(bob, "GET", `/teams/${space.body.id}/agents`)).status).toBe(404);
     expect((await request(ada, "POST", `/teams/${space.body.id}/members`, { userId: bob.id, role: "member" })).status).toBe(400);
     expect((await request(ada, "POST", `/teams/${space.body.id}/join-codes`, {})).status).toBe(400);
+  });
+});
+
+describe("an agent's cap of active sessions (requirement 0004)", () => {
+  it("AS13: a new agent may hold 3 active sessions; a team agent's cap is changed by a team admin, a personal agent's by its owner", async () => {
+    const { teamId, admin, member } = await team();
+    const agent = await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Clerk" });
+    expect(agent.body).toMatchObject({ maxActiveSessions: 3 });
+    expect(await request(admin, "PATCH", `/teams/${teamId}/agents/${agent.body.id}`, { version: 1, maxActiveSessions: 5 })).toMatchObject({ status: 200, body: { maxActiveSessions: 5, version: 2 } });
+    expect((await request(member, "GET", `/teams/${teamId}/agents/${agent.body.id}`)).body).toMatchObject({ maxActiveSessions: 5 });
+    expect((await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Second", maxActiveSessions: 1 })).body).toMatchObject({ maxActiveSessions: 1 });
+    const own = await request(member, "POST", `/teams/${teamId}/agents`, { name: "Helper", personal: true });
+    expect(await request(member, "PATCH", `/teams/${teamId}/agents/${own.body.id}`, { version: 1, maxActiveSessions: 2 })).toMatchObject({ status: 200, body: { maxActiveSessions: 2 } });
+  });
+
+  it("negative (AS13): a member who is neither a team admin nor the personal agent's owner is 403; a cap below 1, above 100 or not an integer is 400", async () => {
+    const { teamId, admin, member } = await team();
+    const other = await person();
+    expect((await request(admin, "POST", `/teams/${teamId}/members`, { userId: other.id, role: "member" })).status).toBe(204);
+    const agent = await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Clerk" });
+    const own = await request(member, "POST", `/teams/${teamId}/agents`, { name: "Helper", personal: true });
+    expect((await request(member, "PATCH", `/teams/${teamId}/agents/${agent.body.id}`, { version: 1, maxActiveSessions: 5 })).status).toBe(403);
+    expect((await request(other, "PATCH", `/teams/${teamId}/agents/${own.body.id}`, { version: 1, maxActiveSessions: 5 })).status).toBe(403);
+    for (const value of [0, -1, 101, 2.5, "3", null, true])
+      expect((await request(admin, "PATCH", `/teams/${teamId}/agents/${agent.body.id}`, { version: 1, maxActiveSessions: value })).status, JSON.stringify(value)).toBe(400);
+    expect((await request(admin, "POST", `/teams/${teamId}/agents`, { name: "A", maxActiveSessions: 0 })).status).toBe(400);
+    expect((await request(admin, "GET", `/teams/${teamId}/agents/${agent.body.id}`)).body).toMatchObject({ maxActiveSessions: 3, version: 1 });
+    expect((await request(member, "GET", `/teams/${teamId}/agents/${own.body.id}`)).body).toMatchObject({ maxActiveSessions: 3, version: 1 });
+  });
+});
+
+describe("a browser on another origin (requirement 0002)", () => {
+  const UI = "https://ui.example.test";
+  const preflight = (on: Hono, path: string, origin: string) =>
+    on.request(path, { method: "OPTIONS", headers: { Origin: origin, "Access-Control-Request-Method": "PATCH", "Access-Control-Request-Headers": "authorization,content-type" } });
+  const corsHeaders = (response: Response) => [...response.headers.keys()].filter((name) => name.startsWith("access-control-"));
+
+  it("HK13: a configured origin's preflight is answered, for the agents' API and the directory's alike, and its calls carry the origin", async () => {
+    const withCors = appWith(hostTokenSender(HOST_TOKEN), [UI, "https://other-ui.example.test"]);
+    for (const path of ["/teams/x/agents/y", "/me"]) {
+      const answer = await preflight(withCors, path, UI);
+      expect(answer.status, path).toBe(204);
+      expect(answer.headers.get("access-control-allow-origin")).toBe(UI);
+      expect(answer.headers.get("access-control-allow-methods")).toContain("PATCH");
+      expect(answer.headers.get("access-control-allow-headers")?.toLowerCase()).toContain("authorization");
+    }
+    const ada = await person();
+    const read = await withCors.request("/me", { headers: { Origin: UI, Authorization: `Bearer ${ada.token}` } });
+    expect(read.status).toBe(200);
+    expect(read.headers.get("access-control-allow-origin")).toBe(UI);
+  });
+
+  it("negative (HK13): another origin, or any origin while none is configured, gets no CORS header at all", async () => {
+    const withCors = appWith(hostTokenSender(HOST_TOKEN), [UI]);
+    const ada = await person();
+    for (const [on, origin] of [
+      [withCors, "https://evil.example.test"],
+      [withCors, "http://ui.example.test"],
+      [withCors, `${UI}.evil.example.test`],
+      [app, UI],
+    ] as const) {
+      const answer = await preflight(on, "/teams/x/agents/y", origin);
+      expect(answer.status, origin).not.toBe(204);
+      expect(corsHeaders(answer), origin).toEqual([]);
+      const read = await on.request("/me", { headers: { Origin: origin, Authorization: `Bearer ${ada.token}` } });
+      expect(read.status).toBe(200);
+      expect(corsHeaders(read), origin).toEqual([]);
+    }
   });
 });
 

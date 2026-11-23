@@ -205,6 +205,35 @@ describe("the entry point", () => {
     expect(output).not.toContain("listening");
   });
 
+  it("HK13: CORS_ORIGINS names the origins whose browsers may call; another origin gets no CORS header", async () => {
+    const answers: Record<string, string | null> = {};
+    const { output } = await start({ ...PORTABLE, CORS_ORIGINS: "https://ui.example.test, http://localhost:5173" }, async (baseUrl) => {
+      for (const origin of ["https://ui.example.test", "http://localhost:5173", "https://evil.example.test"]) {
+        const answer = await fetch(`${baseUrl}/me`, { method: "OPTIONS", headers: { Origin: origin, "Access-Control-Request-Method": "GET" } });
+        answers[origin] = answer.headers.get("access-control-allow-origin");
+      }
+    });
+    expect(output).toContain("browsers from 2 origins");
+    expect(answers).toEqual({ "https://ui.example.test": "https://ui.example.test", "http://localhost:5173": "http://localhost:5173", "https://evil.example.test": null });
+  });
+
+  it.each([
+    `http://ui.example.test/${CANARY}`,
+    `http://ui-${CANARY}.example.test`,
+    `https://ui.example.test/${CANARY}`,
+    `https://ui.example.test/`,
+    `https://ui.example.test?${CANARY}`,
+    `https://ui.example.test,,https://${CANARY}.example.test`,
+    `garbage-${CANARY}`,
+    `*`,
+  ])("negative (HK13): a malformed CORS_ORIGINS (%s) stops the start, its value never echoed", async (value) => {
+    const { code, output } = await start({ ...PORTABLE, CORS_ORIGINS: value });
+    expect(code).toBe(1);
+    expect(output).toContain("CORS_ORIGINS");
+    expect(output).not.toContain(CANARY);
+    expect(output).not.toContain("listening");
+  });
+
   it("negative (HK3): a database that cannot be reached stops the start, its URL never echoed", async () => {
     const { code, output } = await run({ ...PORTABLE, DATABASE_URL: `postgres://agents:pw-${CANARY}@127.0.0.1:1/agents` });
     expect(code).toBe(1);
