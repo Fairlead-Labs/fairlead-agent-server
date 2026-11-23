@@ -66,6 +66,20 @@ describe("the MCP client (requirement 0004)", () => {
     expect(mcpCalls(service).slice(before)[0]!.body.method).toBe("initialize");
   });
 
+  it("CN2: on the older revision the caller's own headers go with initialize and its notification too, never the routing ones", async () => {
+    const service = await fake({ tools: [echo], mode: "legacy" });
+    const client = createMcpClient({ url: service.url, revision: LEGACY_REVISION });
+    await client.callTool(tool("echo"), { id: "7" }, { "Fairlead-Run-Id": "run-1", "Fairlead-Run-Step": "step-1" });
+    const [init, done, call] = mcpCalls(service);
+    for (const request of [init!, done!, call!]) expect(request.headers).toMatchObject({ "fairlead-run-id": "run-1", "fairlead-run-step": "step-1" });
+    expect(init!.body.method).toBe("initialize");
+    expect(done!.body.method).toBe("notifications/initialized");
+    for (const request of [init!, done!]) {
+      expect(request.headers["mcp-name"]).toBeUndefined();
+      expect(request.headers["mcp-param-item"]).toBeUndefined();
+    }
+  });
+
   it("CN3: a held call answers a task, polled with tasks/get to its result or its failure; a service's JSON-RPC error is its refusal; no token is 401 with the challenge", async () => {
     const service = await fake({ tools: [{ name: "send", answer: () => ({ task: { pollIntervalMs: 20_000 } }) }], auth: { token: "secret-token-of-the-service-0001" } });
     const refused = createMcpClient({ url: service.url });
