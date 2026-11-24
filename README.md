@@ -28,7 +28,8 @@ built yet*).
 | `src/notify.ts` | What the server announces; the host webhook |
 | `src/keys.ts` | A key per team, sealing transcripts, summaries and model keys; wrapped by a key service (Cloud KMS) or a local key |
 | `src/prompt.ts`, `playbooks/` | The system prompt and the playbooks, English and German |
-| `src/directory/` | Users, teams, members, invitations and join codes, in the Postgres schema `directory` that another product may share |
+| `src/directory/` | Users, teams, members, invitations and join codes, in the Postgres schema `directory` that another product may share; deleted users and each team's retention |
+| `src/deletion.ts` | A deleted account, told by the sign-in service: the personal space's records, personal agents and owner marks removed |
 | `src/migrations.ts`, `src/db/` | The tables with row-level security on `team_id`, applied at every start, and the two read-only views for a host on the same database; the SQL port, transactions, team scoping |
 | `src/google.ts` | Google Cloud over `fetch`: Cloud KMS, the metadata server's tokens |
 | `src/server/` | The HTTP entry point, the only place that reads the environment; `server.ts`, the server wired from options (the package export `./server`, for a host's tests); sign-in by an OIDC provider's token, the directory's API, the API for agents, sessions and connections, the host's triggers |

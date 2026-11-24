@@ -30,6 +30,9 @@ import { hostIdentitySender, hostTokenSender, noSenders } from "./senders.js";
  *   HOST_AUDIENCE naming HOST_SUBJECT; HOST_WEBHOOK_URL, told of
  *   the work, signed with HOST_WEBHOOK_SECRET (`whsec_…`) or
  *   HOST_WEBHOOK_AUDIENCE (a Google identity token).
+ * - Deleted accounts (optional, all three or none): ACCOUNT_DELETION_ISSUER,
+ *   ACCOUNT_DELETION_AUDIENCE and ACCOUNT_DELETION_SUBJECT, the sign-in
+ *   service's identity admitted at `POST /users/deleted`.
  * - CORS_ORIGINS (optional): comma-separated https origins whose browsers
  *   may call the API (http only on loopback); none by default.
  * The database is migrated at every start.
@@ -91,6 +94,8 @@ const hostIssuer = env["HOST_ISSUER"] || undefined;
 if (hostToken !== undefined && hostIssuer !== undefined) fail("Set either HOST_ISSUER or HOST_TOKEN, not both");
 if (hostToken !== undefined) sharedToken("HOST_TOKEN", hostToken);
 if (hostIssuer === undefined && (env["HOST_AUDIENCE"] || env["HOST_SUBJECT"])) fail("HOST_AUDIENCE and HOST_SUBJECT need HOST_ISSUER");
+const deletion = ["ACCOUNT_DELETION_ISSUER", "ACCOUNT_DELETION_AUDIENCE", "ACCOUNT_DELETION_SUBJECT"].filter((name) => env[name]);
+if (deletion.length !== 0 && deletion.length !== 3) fail("ACCOUNT_DELETION_ISSUER, ACCOUNT_DELETION_AUDIENCE and ACCOUNT_DELETION_SUBJECT are set together or not at all");
 const identityProject = env["TEAM_IDENTITY_PROJECT"] || undefined;
 if (identityProject !== undefined && !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(identityProject)) fail("TEAM_IDENTITY_PROJECT must be a Google Cloud project id");
 const awsAudience = env["AWS_STS_AUDIENCE"] || undefined;
@@ -139,6 +144,9 @@ const { app, scheduler } = createServer({
   corsOrigins,
   ...(hostMcp ? { hostMcp: { url: hostMcp.url, token: tokenFor(hostMcp.way) } } : {}),
   senders: hostToken !== undefined ? hostTokenSender(hostToken) : hostIssuer !== undefined ? hostIdentitySender({ issuer: hostIssuer, audience: word("HOST_AUDIENCE"), subject: word("HOST_SUBJECT") }) : noSenders,
+  ...(deletion.length === 3
+    ? { accountDeletionCallers: hostIdentitySender({ issuer: secureUrl("ACCOUNT_DELETION_ISSUER"), audience: word("ACCOUNT_DELETION_AUDIENCE"), subject: word("ACCOUNT_DELETION_SUBJECT") }) }
+    : {}),
   ...(hostWebhook
     ? { notifier: createWebhookNotifier({ url: hostWebhook.url, ...("portable" in hostWebhook.way ? { secret: hostWebhook.way.portable } : { token: tokenFor(hostWebhook.way) }) }) }
     : {}),
@@ -148,6 +156,7 @@ const { app, scheduler } = createServer({
 await migrateDatabase(db).catch((error: unknown) => fail(`the database could not be migrated (${error instanceof Error ? error.name : "error"})`));
 console.log(`fairlead-agent-server: users sign in at ${oidcIssuer}; teams are created by ${teamCreation}; teams' keys wrapped by ${localKey ? "a local key" : "Cloud KMS"}`);
 console.log(`fairlead-agent-server: host tools ${hostMcp ? `at ${hostMcp.url}` : "none"}; host triggers ${hostToken ? "by a bearer token" : hostIssuer ? `by tokens of ${hostIssuer}` : "none"}; host webhook ${hostWebhook ? hostWebhook.url : "none"}`);
+console.log(`fairlead-agent-server: deleted accounts ${deletion.length === 3 ? `told by tokens of ${env["ACCOUNT_DELETION_ISSUER"]}` : "not taken"}`);
 console.log(`fairlead-agent-server: browsers from ${corsOrigins.length} origins may call`);
 console.log(identityProject === undefined ? "fairlead-agent-server: no team identities (no TEAM_IDENTITY_PROJECT): API-key profiles only" : `fairlead-agent-server: team identities in ${identityProject}`);
 scheduler.start();

@@ -425,6 +425,22 @@ describe("controls (requirement 0004)", () => {
     expect(await w.store.forTeam(teamId).findSession(sessionId)).toMatchObject({ state: "closed", closeReason: "idle" });
     expect(await lastRun(teamId, sessionId)).toMatchObject({ transcript: null, summary: null, result: null, state: "completed" });
   });
+
+  it("AS10: transcripts follow the team's retention in the directory; a team without one keeps 30 days", async () => {
+    const [short, plain] = [await w.team(), await w.team()];
+    await w.db.query("UPDATE directory.teams SET retention_days = 2 WHERE id = $1", [short.teamId]);
+    const sessions = [(await hostTrigger(short.teamId, short.agent.id)).sessionId, (await hostTrigger(plain.teamId, plain.agent.id)).sessionId];
+    w.anthropic.script(say("Done."), say("Summary."), say("Done."), say("Summary."));
+    await w.tick();
+    // A scheduler of its own, so its hourly pass is due at once whatever earlier tests' clocks did.
+    const scheduler = createScheduler({ store: w.store, agents: w.agents, directory: w.directory, runner: w.runner, now: () => w.at, onError: (error) => { throw error; } });
+    w.advance(3 * 24 * 60 * MINUTE);
+    await Promise.all(await scheduler.tick());
+    expect(await lastRun(short.teamId, sessions[0]!)).toMatchObject({ transcript: null, result: null, state: "completed" });
+    expect((await lastRun(plain.teamId, sessions[1]!)).transcript).not.toBeNull();
+    // Negative: a retention out of range is refused by the directory.
+    await expect(w.db.query("UPDATE directory.teams SET retention_days = -1 WHERE id = $1", [plain.teamId])).rejects.toThrow();
+  });
 });
 
 describe("the summary while waiting (requirement 0001)", () => {

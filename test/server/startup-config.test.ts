@@ -158,6 +158,16 @@ describe("the entry point", () => {
     expect(output).not.toContain(CANARY);
   });
 
+  it("DL4: ACCOUNT_DELETION_* name the sign-in service's identity at POST /users/deleted; one of the three alone stops the start", async () => {
+    const deletion = { ACCOUNT_DELETION_ISSUER: "https://accounts.example.test", ACCOUNT_DELETION_AUDIENCE: "https://agents.example.test/users/deleted", ACCOUNT_DELETION_SUBJECT: "sign-in@example.test" };
+    expect((await start({ ...PORTABLE, ...deletion })).output).toContain("deleted accounts told by tokens of https://accounts.example.test");
+    expect((await start({ ...PORTABLE })).output).toContain("deleted accounts not taken");
+    const { code, output } = await start({ ...PORTABLE, ACCOUNT_DELETION_SUBJECT: deletion.ACCOUNT_DELETION_SUBJECT });
+    expect(code).toBe(1);
+    expect(output).toContain("ACCOUNT_DELETION_ISSUER, ACCOUNT_DELETION_AUDIENCE and ACCOUNT_DELETION_SUBJECT");
+    expect((await start({ ...PORTABLE, ...deletion, ACCOUNT_DELETION_ISSUER: `http://accounts.example.test/${CANARY}` })).output).not.toContain(CANARY);
+  }, 30_000);
+
   it.each([
     ["LOCAL_KEY", randomBytes(16).toString("base64")],
     ["LOCAL_KEY", `not base64 ${CANARY}`],

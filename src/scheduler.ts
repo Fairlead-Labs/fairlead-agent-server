@@ -13,10 +13,12 @@ import { dueRuns, RUN_SLICE_MS, type RunStore } from "./store.js";
  * agent as many as its cap of active sessions leaves, none of a paused or
  * disabled agent. A run waiting for a free session is so picked up at the
  * first tick after one stops working, a fresh process's first included. Hourly,
- * transcripts of runs ended 30 days ago are purged and sessions idle for 7
- * days close.
+ * transcripts of runs ended longer ago than the team's retention
+ * (`directory.teams.retention_days`, 30 days when none is set) are purged
+ * and sessions idle for 7 days close.
  */
 
+/** A team's retention when the directory names none. */
 export const TRANSCRIPT_DAYS = 30;
 export const IDLE_SESSION_DAYS = 7;
 const DAY_MS = 86_400_000;
@@ -34,7 +36,7 @@ export function createScheduler({
 }: {
   store: RunStore;
   agents: AgentStore;
-  directory: Pick<Directory, "allTeams" | "roleOf">;
+  directory: Pick<Directory, "allTeams" | "roleOf" | "retentionDays">;
   runner: Runner;
   now?: () => Date;
   concurrency?: number;
@@ -73,7 +75,8 @@ export function createScheduler({
   async function hourly(teamId: string) {
     const at = now();
     const runs = store.forTeam(teamId);
-    await runs.purgeTranscripts(new Date(at.getTime() - TRANSCRIPT_DAYS * DAY_MS));
+    const days = (await directory.retentionDays(teamId)) ?? TRANSCRIPT_DAYS;
+    await runs.purgeTranscripts(new Date(at.getTime() - days * DAY_MS));
     await runs.closeIdleSessions(new Date(at.getTime() - IDLE_SESSION_DAYS * DAY_MS), at);
   }
 

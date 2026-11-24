@@ -165,5 +165,6 @@
 - A service that admits the server's runs trusts one more signer and reads
   a run's state to admit its id.
 - Transcripts hold content the services' audit logs do not: they are
-  sealed under the team's key and kept 30 days.
+  sealed under the team's key and kept for the team's retention (30 days
+  by default).
 - Tokens are paid on the team's own account.

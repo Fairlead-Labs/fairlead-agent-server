@@ -66,6 +66,14 @@ the API and agents reach only their team's own connections.
 | Triggers at `POST /triggers` | `HOST_TOKEN`: the bearer token the host sends | `HOST_ISSUER`, `HOST_AUDIENCE`, `HOST_SUBJECT`: the host sends a token of that issuer for that audience, naming that subject (a Google identity token: `https://accounts.google.com`, this server's URL, the host's service account) |
 | `HOST_WEBHOOK_URL`: told of each new question, each answer and each run that waits or ends (ids and kinds, never a question's text) | `HOST_WEBHOOK_SECRET`: a `whsec_` secret; each delivery is signed by Standard Webhooks | `HOST_WEBHOOK_AUDIENCE`: each delivery carries a Google identity token for that audience |
 
+**Deleted accounts** (optional, all three or none): the sign-in service
+tells the server of a deleted account at `POST /users/deleted`
+([requirement 0003](requirements/0003-directory.md), *Deleted accounts*),
+admitted by a token of `ACCOUNT_DELETION_ISSUER` (an https URL) for
+`ACCOUNT_DELETION_AUDIENCE`, naming `ACCOUNT_DELETION_SUBJECT` (its `sub`, or
+a verified `email`), such as a Google identity token of the sign-in
+service's service account. Unset, the route admits nobody.
+
 Bearer tokens are 32 to 512 printable characters without spaces. A team's
 own MCP services are configured through the API, not here
 ([requirement 0004](requirements/0004-agents-sessions-connections.md)).

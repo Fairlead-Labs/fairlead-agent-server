@@ -12,6 +12,7 @@ import { PROFILE_PROVIDERS, type Profile, type ProfileSettings } from "../profil
 import { OPEN_RUN_STATES, type Question, type Run, type RunStore, type Session } from "../store.js";
 import { WorkError, type Work } from "../work.js";
 import { SignInUnavailableError, type Caller } from "./oidc.js";
+import type { DeleteUser } from "../deletion.js";
 import type { TriggerSenders } from "./senders.js";
 
 /**
@@ -34,6 +35,8 @@ export interface ApiDependencies {
   sealer: TeamSealer;
   work: Work;
   senders: TriggerSenders;
+  /** The sign-in service's deleted accounts (requirement 0003, *Deleted accounts*): who may tell, and what follows; nobody by default. */
+  accountDeletion?: { callers: TriggerSenders; deleteUser: DeleteUser };
   /** This server's public address, for the OAuth callback and its client ID metadata document. */
   publicUrl: string;
   /** Origins whose browsers may call (requirement 0002, HK13); none by default. */
@@ -203,6 +206,15 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
     return c.json(result, result.duplicate ? 200 : 202);
   });
 
+  // The sign-in service tells of a deleted account: only its own identity, never the host's credential or a person's token.
+  app.post("/users/deleted", async (c) => {
+    if (!deps.accountDeletion || !(await deps.accountDeletion.callers.admit(c.req.header("Authorization")))) return c.json({ error: "Invalid credential" }, 401);
+    const given = (await c.req.json().catch(() => undefined)) as Json | undefined;
+    if (!given || !WORD(given["issuer"]) || !WORD(given["subject"])) return c.json({ error: "Invalid request" }, 400);
+    await deps.accountDeletion.deleteUser({ issuer: given["issuer"], subject: given["subject"] });
+    return c.body(null, 204);
+  });
+
   app.get("/oauth/client-metadata.json", (c) => c.json(clientMetadata(metadataUrl, redirectUri)));
 
   app.get("/oauth/callback", async (c) => {
@@ -264,8 +276,11 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
       throw error;
     }
     if (!caller) return c.json({ error: "Invalid token" }, 401);
+    const user = await directory.signIn(caller);
+    // A deleted account is never let in again (requirement 0003, *Deleted accounts*).
+    if (user.deleted) return c.json({ error: "Invalid token" }, 401);
     c.set("caller", caller);
-    c.set("user", await directory.signIn(caller));
+    c.set("user", user);
     return next();
   });
 
