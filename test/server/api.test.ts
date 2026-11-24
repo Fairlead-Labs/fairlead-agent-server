@@ -287,7 +287,9 @@ describe("sessions through the API (requirement 0004)", () => {
     const { question } = (await request(member, "GET", path)).body;
     expect(question).toMatchObject({ text: "Which one?", kind: "agent" });
     expect((await request(other, "GET", `/teams/${teamId}/questions`)).body.questions).toEqual([]);
-    expect((await request(member, "GET", `/teams/${teamId}/questions`)).body.questions).toEqual([expect.objectContaining({ id: question.id })]);
+    expect((await request(member, "GET", `/teams/${teamId}/questions`)).body.questions).toEqual([
+      expect.objectContaining({ id: question.id, sessionId, agentId: agent.id, text: "Which one?", priority: null, dueOn: null }),
+    ]);
     expect((await request(other, "POST", `/teams/${teamId}/questions/${question.id}/answer`, { answer: "This one." })).status).toBe(403);
     expect((await request(other, "PATCH", path, { version: 1, ownerUserIds: [other.id] })).status).toBe(403);
     expect((await request(other, "POST", `${path}/close`)).status).toBe(403);
@@ -298,6 +300,21 @@ describe("sessions through the API (requirement 0004)", () => {
     expect((await request(member, "POST", `/teams/${teamId}/questions/${question.id}/answer`, { answer: "This one." })).body).toMatchObject({ state: "answered" });
     // A team admin stops any run (AS3).
     expect((await request(admin, "POST", `/teams/${teamId}/runs/${run.id}/stop`)).body).toMatchObject({ state: "cancelled" });
+  });
+
+  it("AS9: a question names its agent and its run's priority and due date from the trigger; the whole team sees a session without owners", async () => {
+    const { teamId, admin, member } = await team();
+    const profile = await request(admin, "POST", `/teams/${teamId}/profiles`, claudeProfile());
+    const agent = (await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Clerk", profileId: profile.body.id })).body;
+    const trigger = { teamId, agentId: agent.id, event: "task.assigned", reference: `task-${randomUUID()}`, priority: "high", dueOn: "2026-12-01" };
+    const { sessionId } = (await request(HOST_TOKEN, "POST", "/triggers", trigger)).body;
+    w.anthropic.script(toolCall("ask_person", { question: "Which ledger?" }));
+    await w.tick();
+    for (const who of [admin, member]) {
+      expect((await request(who, "GET", `/teams/${teamId}/questions`)).body.questions).toEqual([
+        expect.objectContaining({ sessionId, agentId: agent.id, kind: "agent", text: "Which ledger?", priority: "high", dueOn: "2026-12-01", state: "open" }),
+      ]);
+    }
   });
 
   it("AS11: usage per team for its admins; an installation admin sees each team's totals, never its sessions", async () => {

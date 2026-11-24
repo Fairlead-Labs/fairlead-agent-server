@@ -748,17 +748,25 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
 
   // ---- questions: listed to the sessions' owners
 
-  const questionView = async (teamId: string, q: Question) => ({
-    id: q.id,
-    sessionId: q.sessionId,
-    runId: q.runId,
-    kind: q.kind,
-    cause: q.cause,
-    text: await sealer.open(teamId, "question", q.body),
-    state: q.state,
-    createdAt: q.createdAt,
-    answeredAt: q.answeredAt,
-  });
+  /** A question to its session's owners; its agent, and its run's priority and due date (the trigger's), for a host's order. */
+  const questionView = async (teamId: string, q: Question) => {
+    const runs = store.forTeam(teamId);
+    const [session, run] = await Promise.all([runs.findSession(q.sessionId), runs.findRun(q.runId)]);
+    return {
+      id: q.id,
+      sessionId: q.sessionId,
+      agentId: session?.agentId ?? null,
+      runId: q.runId,
+      priority: run?.priority ?? null,
+      dueOn: run?.dueOn ?? null,
+      kind: q.kind,
+      cause: q.cause,
+      text: await sealer.open(teamId, "question", q.body),
+      state: q.state,
+      createdAt: q.createdAt,
+      answeredAt: q.answeredAt,
+    };
+  };
 
   app.get("/teams/:teamId/questions", async (c) => {
     if (!(await roleIn(c))) return notFound(c, "Team not found");

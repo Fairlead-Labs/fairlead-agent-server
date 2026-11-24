@@ -148,11 +148,16 @@ describe("waiting and resuming (requirements 0001, 0004)", () => {
     const [question] = await w.store.forTeam(teamId).listQuestions({ sessionId });
     expect(await open(teamId, "question", question!.body)).toBe("Which cost centre?");
     expect(w.events.map((e) => e.type)).toEqual(["question.created", "run.waiting"]);
-    expect(w.events[0]).toMatchObject({ ownerUserIds: [member], text: "Which cost centre?" });
+    expect(w.events[0]).toMatchObject({ type: "question.created", teamId, agentId: agent.id, sessionId, questionId: question!.id, kind: "agent", cause: null, ownerUserIds: [member] });
+    expect(JSON.stringify(w.events), "content-free: no question text in an event").not.toContain("cost centre");
     await w.work.receive({ teamId, agentId: agent.id, sender: "user", userId: member, event: "message", reference: randomUUID(), body: "Also add a note.", sessionId });
     await expect(w.work.answer(teamId, question!.id, admin, "4711")).rejects.toMatchObject({ code: "forbidden" });
     await w.work.answer(teamId, question!.id, member, "4711");
+    expect(w.events.at(-1)).toEqual({ type: "question.answered", teamId, agentId: agent.id, sessionId, runId: run.id, questionId: question!.id, kind: "agent" });
+    expect(JSON.stringify(w.events), "content-free: no answer in an event").not.toContain("4711");
+    const events = w.events.length;
     await expect(w.work.answer(teamId, question!.id, member, "4712")).rejects.toMatchObject({ code: "closed" });
+    expect(w.events, "a refused answer announces nothing").toHaveLength(events);
     w.anthropic.script(say("Booked to 4711 with a note."), say("Summary."));
     await w.tick();
     expect(await lastRun(teamId, sessionId)).toMatchObject({ id: run.id, state: "completed" });

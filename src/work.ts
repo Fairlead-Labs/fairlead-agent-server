@@ -197,6 +197,7 @@ export function createWork({
       if (question.kind === "runner" ? text !== "continue" && text !== "stop" : text.length < 1 || text.length > 4000) throw new WorkError("invalid");
       const answered = await runs.updateQuestion(question.id, question.version, { state: "answered", answer: await sealer.seal(teamId, "answer", text), answeredBy: userId, answeredAt: at() });
       if (!answered) throw new WorkError("conflict");
+      notifier.notify({ type: "question.answered", teamId, agentId: session.agentId, sessionId: session.id, runId: question.runId, questionId: question.id, kind: question.kind });
       const stop = question.kind === "runner" && text === "stop";
       const run = await changeRun(runs, question.runId, (r) =>
         r.state === "input_required" && r.waitingOn && "questionId" in r.waitingOn && r.waitingOn.questionId === question.id

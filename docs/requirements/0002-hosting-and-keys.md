@@ -78,8 +78,8 @@ scheduler in the same process.
   `HOST_SUBJECT`, or `HOST_TOKEN`). It may do nothing else through the
   API.
 - **The host webhook.** Where one is configured (`HOST_WEBHOOK_URL`), the
-  server tells it of each new question and each run that waits or ends,
-  signed by Standard Webhooks (`HOST_WEBHOOK_SECRET`) or carrying a Google
+  server tells it of each new question, each answer and each run that
+  waits or ends, by ids and kinds only (never a question's text), signed by Standard Webhooks (`HOST_WEBHOOK_SECRET`) or carrying a Google
   identity token (`HOST_WEBHOOK_AUDIENCE`).
 - **Other trigger senders** with a credential for one team are a later
   adapter of the same port.
