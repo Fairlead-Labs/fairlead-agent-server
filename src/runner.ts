@@ -455,7 +455,7 @@ export function createRunner(deps: RunnerDependencies) {
         await this.save({ state: "input_required", waitingOn: kind === "agent" ? { kind: "question", callId: callId!, questionId: question.id } : { kind: "runner-question", callId, questionId: question.id, cause: cause! }, sliceStartedAt: null }, () =>
           this.runs.updateQuestion(question.id, question.version, { state: "withdrawn" }),
         );
-        notifier.notify({ type: "question.created", teamId: this.teamId, agentId: this.agent.id, sessionId: this.session.id, runId: this.run.id, questionId: question.id, kind, cause, text, ownerUserIds: this.session.ownerUserIds });
+        notifier.notify({ type: "question.created", teamId: this.teamId, agentId: this.agent.id, sessionId: this.session.id, runId: this.run.id, questionId: question.id, kind, cause, ownerUserIds: this.session.ownerUserIds });
         this.notifyWaiting();
         return "waiting";
       }
@@ -700,7 +700,7 @@ export function createRunner(deps: RunnerDependencies) {
         };
         await this.runs.insertRun({ ...run, cause: "answer", state: "input_required", waitingOn: { kind: "runner-question", callId: null, questionId: question.id, cause: "runs-used" } });
         await this.runs.insertQuestion(question);
-        notifier.notify({ type: "question.created", teamId: this.teamId, agentId: this.agent.id, sessionId: this.session.id, runId: run.id, questionId: question.id, kind: "runner", cause: "runs-used", text, ownerUserIds: this.session.ownerUserIds });
+        notifier.notify({ type: "question.created", teamId: this.teamId, agentId: this.agent.id, sessionId: this.session.id, runId: run.id, questionId: question.id, kind: "runner", cause: "runs-used", ownerUserIds: this.session.ownerUserIds });
         return;
       }
       // ponytail: the run's end and the next run are two writes; a crash between leaves the session idle until its next trigger.

@@ -60,6 +60,16 @@ export const DIRECTORY_MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX join_codes_team ON directory.join_codes (team_id)`,
 ],
   },
+  {
+    // A deleted account (the sign-in service's `POST /users/deleted`): the user's row stays, marked;
+    // a team's retention, one value read by every product sharing the directory for its own records (null: 30 days).
+    name: "0002-deleted-users-team-retention",
+    statements: [
+      `ALTER TABLE directory.users ADD COLUMN deleted_at timestamptz`,
+      `CREATE INDEX users_deleted ON directory.users (deleted_at) WHERE deleted_at IS NOT NULL`,
+      `ALTER TABLE directory.teams ADD COLUMN retention_days integer CHECK (retention_days BETWEEN 0 AND 36500)`,
+    ],
+  },
 ];
 
 /** Brings the `directory` schema to this version. */

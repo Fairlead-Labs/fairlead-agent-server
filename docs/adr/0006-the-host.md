@@ -28,8 +28,10 @@ installation already knows.
      with the server's own sign-in, bound to the run
      ([ADR 0001](0001-architecture.md) §2), without a connection per team;
    - **the host webhook**, where the server announces every team's new
-     questions and the end of a session's run, signed or carrying an
-     identity token.
+     and answered questions and a run that waits or ends, by ids and kinds
+     only, signed or carrying an identity token. A question's text and its
+     answer never leave through it: the people who may read them do so
+     through the API with their own sign-in.
 2. **Every trigger still names its team and agent,** and the server checks
    both: the agent is in that team and working there, a session it names
    is that agent's, owners it names are members. The host chooses which
@@ -45,7 +47,7 @@ installation already knows.
 5. **A host on the same database reads two views, nothing else.** The
    server's migrations add `agent_server.host_runs` (a run's id, team,
    agent, state, slice end and latest step: what admitting a call as the
-   run takes) and `agent_server.host_agents` (an agent's id, team, owner
+   run takes; and its session, to address a trigger to it) and `agent_server.host_agents` (an agent's id, team, owner
    and removal). The installation grants the host's role `SELECT` on them
    alone. A view reads as its owner, so across teams, and holds no content
    column: no transcript, summary, question or setting. The host reads the
@@ -72,7 +74,9 @@ installation already knows.
 - A leaked host credential sends work to every team. A workload identity
   keeps that window under an hour; a bearer token lasts until it is
   changed, so the configuration reference recommends the identity.
-- The host webhook receives every team's question texts: it is for a
-  product the installation trusts with them.
+- The host webhook learns that a team's question was asked or answered,
+  and by which agent in which session, never what was asked: a host shows
+  the questions to people by reading the API as them, so only the
+  session's owners read the text.
 - The views are a contract: their columns change only by a new migration,
   and a host's checks follow.

@@ -197,28 +197,47 @@ class TeamSignIn {
     }
   }
 
+  /**
+   * Renews the access token. Several runs of one agent may hold the
+   * credential at once (its cap of active sessions): a newer version
+   * another run stored meanwhile is taken instead, before refreshing and
+   * after a refresh or a save that failed, since a service may refuse a
+   * refresh token already used.
+   */
   private async renew() {
-    const grant = JSON.parse(await this.sealer.open(this.teamId, "connection-credential", this.credential.secret)) as OAuthGrant;
+    const held = this.credential;
+    if (await this.takeNewer(held)) return;
+    const grant = JSON.parse(await this.sealer.open(this.teamId, "connection-credential", held.secret)) as OAuthGrant;
     if (!grant.refreshToken) {
-      await this.mark(this.credential.scope);
+      await this.mark(held.scope);
       throw new CredentialNeededError(this.connection.name);
     }
     let tokens;
     try {
       tokens = await refreshTokens({ tokenEndpoint: grant.tokenEndpoint, refreshToken: grant.refreshToken, clientId: grant.clientId, clientSecret: grant.clientSecret, resource: grant.resource }, this.fetchImpl, this.now());
     } catch {
-      await this.mark(this.credential.scope);
+      if (await this.takeNewer(held)) return;
+      await this.mark(held.scope);
       throw new CredentialNeededError(this.connection.name);
     }
-    const next = await this.store.updateCredential(this.credential.agentId, this.credential.connectionId, this.credential.version, {
+    const next = await this.store.updateCredential(held.agentId, held.connectionId, held.version, {
       access: await this.sealer.seal(this.teamId, "connection-credential", tokens.accessToken),
       accessExpiresAt: tokens.expiresAt,
       ...(tokens.refreshToken ? { secret: await this.sealer.seal(this.teamId, "connection-credential", JSON.stringify({ ...grant, refreshToken: tokens.refreshToken })) } : {}),
       ...(tokens.scope ? { scope: tokens.scope } : {}),
       updatedAt: this.now().toISOString(),
     });
-    if (!next) throw new CredentialNeededError(this.connection.name);
-    this.credential = next;
+    if (next) this.credential = next;
+    // ponytail: two renewals in the same instant may both refresh; the loser's token is then dropped, the winner's kept.
+    else if (!(await this.takeNewer(held))) throw new CredentialNeededError(this.connection.name);
+  }
+
+  /** Takes a version of the credential newer than `held` that another run renewed, while it is active with a token. */
+  private async takeNewer(held: AgentCredential): Promise<boolean> {
+    const latest = await this.store.findCredential(held.agentId, held.connectionId);
+    if (!latest || latest.version === held.version || latest.state !== "active" || latest.kind !== "oauth" || latest.access === null) return false;
+    this.credential = latest;
+    return true;
   }
 
   private async mark(scope: string | null) {

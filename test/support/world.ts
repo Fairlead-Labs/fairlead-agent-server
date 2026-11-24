@@ -55,6 +55,8 @@ const noIdentity: TeamIdentity = {
 };
 
 export interface World {
+  /** The database, for what a test sets or reads beside the stores. */
+  db: Awaited<ReturnType<typeof database>>;
   at: Date;
   advance(ms: number): void;
   directory: Directory;
@@ -79,7 +81,7 @@ export interface World {
 
 export async function startWorld(): Promise<World> {
   const db = await database();
-  const world = { at: new Date("2026-11-21T09:00:00.000Z") } as World;
+  const world = { db, at: new Date("2026-11-21T09:00:00.000Z") } as World;
   const now = () => world.at;
   world.advance = (ms) => {
     world.at = new Date(world.at.getTime() + ms);

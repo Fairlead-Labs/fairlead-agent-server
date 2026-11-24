@@ -238,20 +238,23 @@ export function createMcpClient({ url, token, revision: known, onRevision, fetch
     return message["result"] as Record<string, unknown>;
   }
 
-  async function initialize() {
+  /** The caller's own headers (a host's run headers, say), without the routing ones: they go with `initialize` too. */
+  const ownHeaders = (headers: Record<string, string>) => Object.fromEntries(Object.entries(headers).filter(([name]) => !/^mcp-/i.test(name)));
+
+  async function initialize(headers: Record<string, string>) {
     revision = LEGACY_REVISION;
     session = undefined;
-    const result = await exchange("initialize", { protocolVersion: LEGACY_REVISION, capabilities: {}, clientInfo: CLIENT_INFO }, {}, true);
+    const result = await exchange("initialize", { protocolVersion: LEGACY_REVISION, capabilities: {}, clientInfo: CLIENT_INFO }, headers, true);
     if (result === "fallback") throw new McpUnavailableError("initialize refused");
     settle(typeof result["protocolVersion"] === "string" ? result["protocolVersion"] : LEGACY_REVISION);
-    const done = await post({ jsonrpc: "2.0", method: "notifications/initialized" }, { "MCP-Protocol-Version": revision!, ...(session ? { "Mcp-Session-Id": session } : {}) });
+    const done = await post({ jsonrpc: "2.0", method: "notifications/initialized" }, { "MCP-Protocol-Version": revision!, ...(session ? { "Mcp-Session-Id": session } : {}), ...headers });
     await done.body?.cancel();
   }
 
   let ready: Promise<void> | undefined;
   async function request(method: string, params: JsonObject, headers: Record<string, string> = {}): Promise<Record<string, unknown>> {
     if (revision !== undefined && revision !== MCP_REVISION) {
-      ready ??= (session ? Promise.resolve() : initialize()).catch((error: unknown) => {
+      ready ??= (session ? Promise.resolve() : initialize(ownHeaders(headers))).catch((error: unknown) => {
         ready = undefined;
         throw error;
       });
@@ -259,7 +262,7 @@ export function createMcpClient({ url, token, revision: known, onRevision, fetch
       const answer = await exchange(method, params, headers, true);
       if (answer !== "fallback") return answer;
       // The service forgot the session: once more with a new one.
-      ready = initialize();
+      ready = initialize(ownHeaders(headers));
       await ready;
       const again = await exchange(method, params, headers, true);
       if (again === "fallback") throw new McpUnavailableError("session refused");

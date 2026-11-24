@@ -39,8 +39,11 @@ export function createDirectoryApp({ directory, verify, teamCreation }: Director
       throw error;
     }
     if (!caller) return c.json({ error: "Invalid token" }, 401);
+    const user = await directory.signIn(caller);
+    // A deleted account is never let in again (requirement 0003, *Deleted accounts*).
+    if (user.deleted) return c.json({ error: "Invalid token" }, 401);
     c.set("caller", caller);
-    c.set("user", await directory.signIn(caller));
+    c.set("user", user);
     return next();
   });
 

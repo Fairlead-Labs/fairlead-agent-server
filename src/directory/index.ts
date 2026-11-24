@@ -18,8 +18,10 @@ export interface DirectoryUser {
   id: string;
   issuer: string;
   subject: string;
-  /** The verified email its last token carried, lower case; null when it carried none. */
+  /** The verified email its last token carried, lower case; null when it carried none or the account was deleted. */
   email: string | null;
+  /** The sign-in service deleted the account (`POST /users/deleted`): never signed in again. */
+  deleted: boolean;
 }
 export interface DirectoryTeam {
   id: string;
@@ -58,8 +60,12 @@ export class DirectoryError extends Error {
 }
 
 export interface Directory {
-  /** The user of this issuer and subject, made at first sight. `email` only when the token verified it. */
+  /** The user of this issuer and subject, made at first sight. `email` only when the token verified it; a deleted user's row is answered unchanged. */
   signIn(identity: { issuer: string; subject: string; email: string | null }): Promise<DirectoryUser>;
+  /** Marks the account deleted (its row kept, made when unknown, its email cleared); a second time keeps the first time. Answers the user and their personal space's id, if any. */
+  markDeleted(identity: { issuer: string; subject: string }): Promise<{ userId: string; personalSpaceId: string | null }>;
+  /** The team's retention in days (null: none set; the server's records then keep 30). */
+  retentionDays(teamId: string): Promise<number | null>;
   createTeam(userId: string, name: string): Promise<DirectoryTeam>;
   /** The user's personal space, made at its first use with the user its one member (an admin). */
   personalSpace(userId: string): Promise<DirectoryTeam>;
@@ -127,12 +133,32 @@ export function createDirectory(db: TransactionalSqlDatabase, { now = () => new 
   return {
     async signIn({ issuer, subject, email }) {
       if (!issuer || !subject) throw new DirectoryError("invalid");
-      const { rows } = await db.query<{ id: string; email: string | null }>(
+      const { rows } = await db.query<{ id: string; email: string | null; deleted: boolean }>(
         `INSERT INTO directory.users (id, issuer, subject, email, created_at) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (issuer, subject) DO UPDATE SET email = EXCLUDED.email RETURNING id, email`,
+         ON CONFLICT (issuer, subject) DO UPDATE SET email = CASE WHEN directory.users.deleted_at IS NULL THEN EXCLUDED.email ELSE directory.users.email END
+         RETURNING id, email, deleted_at IS NOT NULL AS deleted`,
         [randomUUID(), issuer, subject, email?.toLowerCase() ?? null, now()],
       );
-      return { id: rows[0]!.id, issuer, subject, email: rows[0]!.email };
+      return { id: rows[0]!.id, issuer, subject, email: rows[0]!.email, deleted: rows[0]!.deleted };
+    },
+
+    async markDeleted({ issuer, subject }) {
+      if (!issuer || !subject) throw new DirectoryError("invalid");
+      const { rows } = await db.query<{ id: string; space: string | null }>(
+        `WITH marked AS (
+           INSERT INTO directory.users (id, issuer, subject, email, created_at, deleted_at) VALUES ($1, $2, $3, NULL, $4, $4)
+           ON CONFLICT (issuer, subject) DO UPDATE SET email = NULL, deleted_at = coalesce(directory.users.deleted_at, EXCLUDED.deleted_at)
+           RETURNING id)
+         SELECT m.id, t.id AS space FROM marked m LEFT JOIN directory.teams t ON t.personal_user_id = m.id`,
+        [randomUUID(), issuer, subject, now()],
+      );
+      return { userId: rows[0]!.id, personalSpaceId: rows[0]!.space };
+    },
+
+    async retentionDays(teamId) {
+      if (!UUID.test(teamId)) return null;
+      const { rows } = await db.query<{ retention_days: number | null }>("SELECT retention_days FROM directory.teams WHERE id = $1", [teamId]);
+      return rows[0]?.retention_days ?? null;
     },
 
     async createTeam(userId, name) {

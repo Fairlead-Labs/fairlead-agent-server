@@ -2,7 +2,7 @@
 
 - Status: **built**.
 - Architecture: [ADR 0003](../adr/0003-directory.md).
-- Code: `src/directory/`, `src/server/directory-api.ts`, `src/server/oidc.ts`.
+- Code: `src/directory/`, `src/server/directory-api.ts`, `src/server/oidc.ts`, `src/deletion.ts`.
 
 ## What it is
 
@@ -50,6 +50,39 @@ its members exist once for both and need no sync. The contract:
 - Each product has its own database role with rights on the directory and
   on its own tables only.
 
+## Deleted accounts
+
+When a person deletes their account at the sign-in service, the sign-in
+service tells the server at `POST /users/deleted` with `{ issuer, subject }`.
+Only the sign-in service's own identity is admitted: a token of
+`ACCOUNT_DELETION_ISSUER` for `ACCOUNT_DELETION_AUDIENCE` naming
+`ACCOUNT_DELETION_SUBJECT` (`docs/configuration.md`); unset, nobody is.
+
+- The user's row stays, with `deleted_at` (the first time kept) and without
+  its email; a person the server never saw gets such a row too, so every
+  product sharing the directory learns of the deletion from it. A deleted
+  user is never signed in again.
+- Everything of the server's in their personal space goes: agents,
+  profiles, connections, sessions, runs, questions, triggers, usage and the
+  space's key.
+- Their personal agents in teams are removed (open sessions closed as
+  `agent-removed`, credentials deleted) and their own profiles there
+  deleted; they leave every session's owners and every agent's default
+  owners.
+- The directory's rows stay: the personal space, its membership and the
+  person's memberships in teams. A product sharing the directory removes
+  its own records first and then the space.
+- Each step is safe to repeat; a call that failed part-way is finished by
+  the next one.
+
+## Retention
+
+A team's `retention_days` (0 to 36,500; none set: 30) is how long every
+product sharing the directory keeps that team's records of finished work.
+The server purges a team's transcripts by it (requirement 0001,
+*Transcripts*). The server never writes it; a product sharing the
+directory sets it from its own plans.
+
 ## The API
 
 Every call is a signed-in user's, judged by the caller's own roles:
@@ -81,6 +114,11 @@ its writes. Anyone may leave a team, the last admin excepted.
 | D10 | A bearer token of the configured issuer and audience identifies the caller; the admin role is read from the configured claim. Negative: another issuer or audience, an expired token, a bad signature are 401; the provider unreachable is 503 | `test/server/directory-api.test.ts`, `test/server/startup-config.test.ts` |
 | D11 | The API above. Negative per route: a non-member gets 404 for the team, a member without the admin role 403 for its writes; team creation is 403 when the installation does not allow it | `test/server/directory-api.test.ts` |
 | D12 | An installation admin may list and remove any team and is not thereby a member of any | `test/server/directory-api.test.ts` |
+| DL1 | `POST /users/deleted` marks the user `deleted_at` (made when unknown) and clears the email; the person's tokens are refused afterwards | `test/server/account-deletion.test.ts` |
+| DL2 | The personal space's records, the person's personal agents and own profiles in teams and their owner marks go; the directory's rows stay. Negative: another user's records, agents, profiles and sessions are untouched | `test/server/account-deletion.test.ts` |
+| DL3 | Twice is the same: `deleted_at` keeps the first time | `test/server/account-deletion.test.ts` |
+| DL4 | Only the sign-in service's identity is admitted. Negative: the host's credential, a person's token, a token for another audience or subject, a forged token or none is 401 and marks nobody; a body without an issuer and a subject is 400; one of the three settings alone stops the start | `test/server/account-deletion.test.ts`, `test/server/startup-config.test.ts` |
+| DL5 | A team's `retention_days` is the transcripts' cutoff; a team without one keeps 30 days. Negative: a value out of range is refused | `test/runner.test.ts` (AS10) |
 | D13 | A user's personal space is a team of kind `personal`, made once, with them its only admin. Negative: invitations, join codes, new members and role changes are refused | `test/directory.test.ts`, `test/server/api.test.ts` (AS2) |
 
 ## Open items
@@ -89,3 +127,5 @@ its writes. Anyone may leave a team, the last admin excepted.
 - Assigning a member by email and not by id.
 - A changelog of the directory's migrations for another product that
   shares it.
+- Without a product sharing the directory, a deleted user's memberships
+  and empty personal space stay.

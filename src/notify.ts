@@ -2,10 +2,12 @@ import { createHmac, randomUUID } from "node:crypto";
 
 /**
  * What the server announces (requirement 0004, *Work intake*; ADR 0006):
- * a new question for a session's owners, a run that waits, a run that
- * ended. The destination is a port; the host webhook is one adapter, a
- * webhook per team a later one. Announcing never holds up the work: a
- * destination that fails is tried a few times, then left.
+ * a new question for a session's owners, an answered one, a run that
+ * waits, a run that ended. Ids and kinds only, never content: a question's
+ * text and its answer are read through the API by the people who may. The
+ * destination is a port; the host webhook is one adapter, a webhook per
+ * team a later one. Announcing never holds up the work: a destination that
+ * fails is tried a few times, then left.
  */
 
 export type WorkEvent =
@@ -19,10 +21,10 @@ export type WorkEvent =
       kind: "agent" | "runner";
       /** The runner's reason, for a runner question. */
       cause: string | null;
-      text: string;
       /** Users; empty = the whole team. */
       ownerUserIds: string[];
     }
+  | { type: "question.answered"; teamId: string; agentId: string; sessionId: string; runId: string; questionId: string; kind: "agent" | "runner" }
   | { type: "run.waiting"; teamId: string; agentId: string; sessionId: string; runId: string; state: "input_required" | "auth_required"; waitingOn: string }
   | { type: "run.ended"; teamId: string; agentId: string; sessionId: string; runId: string; state: "completed" | "cancelled" | "failed"; stopReason: string | null };
 

@@ -245,8 +245,8 @@ const SERVER: readonly string[] = [
 /**
  * A host on the same database (ADR 0006) reads two views, each granted to
  * it alone by the installation: `host_runs`, what admitting a run's call
- * takes (its slice's end, `RUN_SLICE_MS` after its claim, and its latest
- * step), and `host_agents`, whether
+ * takes (its slice's end, `RUN_SLICE_MS` after its claim, its latest
+ * step and, since 0004, its session), and `host_agents`, whether
  * an agent exists, where, whose, and whether it was removed. Neither has a
  * content column. A view reads as its owner, so across teams: the one
  * crossing a host has, and the reason they hold nothing more.
@@ -265,9 +265,36 @@ const HOST: readonly string[] = [
 /** The schema of the server's own tables; its connections search it first (`search_path`). */
 export const SERVER_SCHEMA = "agent_server";
 
+/**
+ * An agent's cap of active sessions enforced (requirement 0004): as many
+ * working runs per agent as its cap, checked by the claim under a lock on
+ * the agent, in place of one; and a session closing after its run.
+ */
+const CAP: readonly string[] = [
+  `DROP INDEX runs_one_working`,
+  `CREATE INDEX runs_working ON runs (team_id, agent_id) WHERE state = 'working'`,
+  `ALTER TABLE sessions ADD COLUMN close_after_run boolean NOT NULL DEFAULT false`,
+];
+
+/**
+ * `host_runs` names each run's session, so a host can address a trigger to
+ * it. `CREATE OR REPLACE` adds the column last and keeps the view's owner
+ * and grants.
+ */
+const HOST_SESSION: readonly string[] = [
+  `CREATE OR REPLACE VIEW host_runs AS
+        SELECT r.id, r.team_id, r.agent_id, r.state,
+               r.slice_started_at + interval '15 minutes' AS slice_ends_at,
+               (SELECT s.id FROM steps s WHERE s.run_id = r.id ORDER BY s.n DESC LIMIT 1) AS step_id,
+               r.session_id
+          FROM runs r`,
+];
+
 export const MIGRATIONS: readonly Migration[] = [
   { name: "0001-server", statements: SERVER },
   { name: "0002-host-views-active-sessions", statements: HOST },
+  { name: "0003-active-sessions-cap", statements: CAP },
+  { name: "0004-host-runs-session", statements: HOST_SESSION },
 ];
 
 /** Brings the database to this version's tables: the directory, then the server's own. Answers the names applied now. */

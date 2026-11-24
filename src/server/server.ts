@@ -6,6 +6,7 @@ import { PostgresConnectionStore } from "../connections.js";
 import { createTeamSealer, PostgresTeamKeyStore, type KeyWrapper } from "../keys.js";
 import { noNotifier, type Notifier } from "../notify.js";
 import { createRunner, type RunnerDependencies } from "../runner.js";
+import { createAccountDeletion } from "../deletion.js";
 import { createScheduler } from "../scheduler.js";
 import { PostgresRunStore } from "../store.js";
 import { createToolHub } from "../tools.js";
@@ -43,6 +44,8 @@ export interface ServerOptions {
   hostMcp?: { url: string; token: () => Promise<string> };
   /** Who may send triggers; nobody by default. */
   senders?: TriggerSenders;
+  /** Who may tell of a deleted account at `POST /users/deleted`: the sign-in service's identity (`hostIdentitySender`); nobody by default. */
+  accountDeletionCallers?: TriggerSenders;
   /** Where the work is announced; nowhere by default. */
   notifier?: Notifier;
   /** The teams' cloud identities; none by default (API-key profiles only). */
@@ -88,7 +91,9 @@ export function createServer(options: ServerOptions): AgentServer {
   // After the health check: the host's triggers and the OAuth callback, then a signed-in user's calls (requirements 0003, 0004).
   app.route(
     "/",
-    createApiApp({ directory, verify, store, agents, connections, sealer, work, senders: options.senders ?? noSenders, publicUrl: options.publicUrl, now, ...(options.corsOrigins ? { corsOrigins: options.corsOrigins } : {}) }),
+    createApiApp({ directory, verify, store, agents, connections, sealer, work, senders: options.senders ?? noSenders,
+      ...(options.accountDeletionCallers ? { accountDeletion: { callers: options.accountDeletionCallers, deleteUser: createAccountDeletion({ db, directory, work, now }) } } : {}),
+      publicUrl: options.publicUrl, now, ...(options.corsOrigins ? { corsOrigins: options.corsOrigins } : {}) }),
   );
   app.route("/", createDirectoryApp({ directory, verify, teamCreation: options.teamCreation ?? "admins" }));
   return { app, directory, work, runner, scheduler };

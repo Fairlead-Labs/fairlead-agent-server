@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { RUN_ID_HEADER, RUN_STEP_HEADER, type Run } from "../src/index.js";
+import { createScheduler, RUN_ID_HEADER, RUN_STEP_HEADER, type Run } from "../src/index.js";
+import { newAgent } from "./support/db.js";
 import { call, MODEL, say, sentTo, startWorld, type World } from "./support/world.js";
 
 /**
  * The runner, the scheduler and work intake together (requirement 0001,
- * RN3–RN13; requirement 0004, AS3–AS5, AS8–AS10): real Postgres
+ * RN3–RN13; requirement 0004, AS3–AS5, AS8–AS10, AS14–AS16): real Postgres
  * semantics, a fake Anthropic API and a fake host MCP service.
  */
 
@@ -33,8 +34,8 @@ const lookup = { name: "read_invoice", readOnly: true, answer: (args: Record<str
 const book = { name: "book_invoice", answer: () => ({ text: "Booked." }) };
 
 /** A trigger from the host for the agent. */
-async function hostTrigger(teamId: string, agentId: string, body: unknown = { task: "Book invoice 7" }, reference = randomUUID(), sessionId?: string) {
-  return w.work.receive({ teamId, agentId, sender: "host", userId: null, event: "task.assigned", reference, body: JSON.stringify(body), ...(sessionId ? { sessionId } : {}) });
+async function hostTrigger(teamId: string, agentId: string, body: unknown = { task: "Book invoice 7" }, reference: string = randomUUID(), sessionId?: string, event = "task.assigned") {
+  return w.work.receive({ teamId, agentId, sender: "host", userId: null, event, reference, body: JSON.stringify(body), ...(sessionId ? { sessionId } : {}) });
 }
 const runsOf = async (teamId: string, sessionId: string) => w.store.forTeam(teamId).listRuns({ sessionId });
 const lastRun = async (teamId: string, sessionId: string) => (await runsOf(teamId, sessionId)).at(-1)!;
@@ -147,11 +148,16 @@ describe("waiting and resuming (requirements 0001, 0004)", () => {
     const [question] = await w.store.forTeam(teamId).listQuestions({ sessionId });
     expect(await open(teamId, "question", question!.body)).toBe("Which cost centre?");
     expect(w.events.map((e) => e.type)).toEqual(["question.created", "run.waiting"]);
-    expect(w.events[0]).toMatchObject({ ownerUserIds: [member], text: "Which cost centre?" });
+    expect(w.events[0]).toMatchObject({ type: "question.created", teamId, agentId: agent.id, sessionId, questionId: question!.id, kind: "agent", cause: null, ownerUserIds: [member] });
+    expect(JSON.stringify(w.events), "content-free: no question text in an event").not.toContain("cost centre");
     await w.work.receive({ teamId, agentId: agent.id, sender: "user", userId: member, event: "message", reference: randomUUID(), body: "Also add a note.", sessionId });
     await expect(w.work.answer(teamId, question!.id, admin, "4711")).rejects.toMatchObject({ code: "forbidden" });
     await w.work.answer(teamId, question!.id, member, "4711");
+    expect(w.events.at(-1)).toEqual({ type: "question.answered", teamId, agentId: agent.id, sessionId, runId: run.id, questionId: question!.id, kind: "agent" });
+    expect(JSON.stringify(w.events), "content-free: no answer in an event").not.toContain("4711");
+    const events = w.events.length;
     await expect(w.work.answer(teamId, question!.id, member, "4712")).rejects.toMatchObject({ code: "closed" });
+    expect(w.events, "a refused answer announces nothing").toHaveLength(events);
     w.anthropic.script(say("Booked to 4711 with a note."), say("Summary."));
     await w.tick();
     expect(await lastRun(teamId, sessionId)).toMatchObject({ id: run.id, state: "completed" });
@@ -205,6 +211,62 @@ describe("waiting and resuming (requirements 0001, 0004)", () => {
     await w.tick();
     expect(await lastRun(teamId, sessionId)).toMatchObject({ state: "completed" });
     expect(sentTo(w.anthropic, 1)).toContain("Sent.");
+  });
+
+  it("AS16: a host trigger whose reference is the task the session's run waits on makes it due at once", async () => {
+    w.hostTools.push({ name: "send_mail", answer: () => ({ task: {} }) });
+    const { teamId, agent } = await w.team();
+    const { sessionId } = await hostTrigger(teamId, agent.id);
+    w.anthropic.script(call("send_mail", {}));
+    await w.tick();
+    const taskId = ((await lastRun(teamId, sessionId)).waitingOn as { taskId: string }).taskId;
+    w.host.settle(taskId, { status: "input_required" });
+    w.advance(10_000);
+    await w.tick();
+    w.host.settle(taskId, { status: "completed", result: { text: "Sent." } });
+    // Negative: another reference polls nothing early.
+    await hostTrigger(teamId, agent.id, { note: "other" }, randomUUID(), sessionId, "approval.decided");
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(1);
+    const wake = await hostTrigger(teamId, agent.id, { note: "WAKE-BODY" }, taskId, sessionId, "approval.decided");
+    expect(wake).toMatchObject({ sessionId, duplicate: false });
+    // Stored and deduped as any trigger.
+    expect(await hostTrigger(teamId, agent.id, { note: "again" }, taskId, sessionId, "approval.decided")).toMatchObject({ triggerId: wake.triggerId, duplicate: true });
+    w.anthropic.script(say("Sent it."), say("Summary."));
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(2);
+    expect(await lastRun(teamId, sessionId)).toMatchObject({ state: "completed" });
+    expect(sentTo(w.anthropic, 1)).toContain("Sent.");
+    // It only woke the poll: no run of its own, its body never shown to the model.
+    expect(await runsOf(teamId, sessionId)).toHaveLength(1);
+    expect(w.anthropic.requests.map((r) => JSON.stringify(r.body)).join("")).not.toContain("WAKE-BODY");
+  });
+
+  it("AS16: a run waiting on a working task, queued for a later poll, is polled at once by its task's trigger; another session's trigger touches nothing", async () => {
+    w.hostTools.push({ name: "send_mail", answer: () => ({ task: { pollIntervalMs: 60_000 } }) });
+    const { teamId, agent } = await w.team();
+    const a = await hostTrigger(teamId, agent.id);
+    const b = await hostTrigger(teamId, agent.id);
+    w.anthropic.script(call("send_mail", {}), call("send_mail", {}));
+    await w.tick();
+    const waitingA = await lastRun(teamId, a.sessionId);
+    const waitingB = await lastRun(teamId, b.sessionId);
+    const taskA = (waitingA.waitingOn as { taskId: string }).taskId;
+    expect(waitingA).toMatchObject({ state: "queued", waitingOn: { kind: "task", status: "working" } });
+    // Negative: B's task named by a trigger on A's session wakes neither (a reference is taken once per agent and sender).
+    await hostTrigger(teamId, agent.id, {}, (waitingB.waitingOn as { taskId: string }).taskId, a.sessionId, "approval.decided");
+    expect(await lastRun(teamId, a.sessionId)).toMatchObject({ id: waitingA.id, version: waitingA.version, queuedAt: waitingA.queuedAt });
+    expect(await lastRun(teamId, b.sessionId)).toMatchObject({ id: waitingB.id, version: waitingB.version, queuedAt: waitingB.queuedAt });
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(0);
+    w.host.settle(taskA, { status: "completed", result: { text: "Sent." } });
+    await hostTrigger(teamId, agent.id, {}, taskA, a.sessionId, "approval.decided");
+    expect(await lastRun(teamId, a.sessionId)).toMatchObject({ state: "queued", queuedAt: w.at.toISOString() });
+    w.anthropic.script(say("Sent it."), say("Summary."));
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(1);
+    expect(await lastRun(teamId, a.sessionId)).toMatchObject({ state: "completed" });
+    expect((await lastRun(teamId, b.sessionId)).state).toBe("queued");
   });
 
   it("RN7: after 15 minutes the run is queued again from its stored steps, never ended", async () => {
@@ -363,6 +425,22 @@ describe("controls (requirement 0004)", () => {
     expect(await w.store.forTeam(teamId).findSession(sessionId)).toMatchObject({ state: "closed", closeReason: "idle" });
     expect(await lastRun(teamId, sessionId)).toMatchObject({ transcript: null, summary: null, result: null, state: "completed" });
   });
+
+  it("AS10: transcripts follow the team's retention in the directory; a team without one keeps 30 days", async () => {
+    const [short, plain] = [await w.team(), await w.team()];
+    await w.db.query("UPDATE directory.teams SET retention_days = 2 WHERE id = $1", [short.teamId]);
+    const sessions = [(await hostTrigger(short.teamId, short.agent.id)).sessionId, (await hostTrigger(plain.teamId, plain.agent.id)).sessionId];
+    w.anthropic.script(say("Done."), say("Summary."), say("Done."), say("Summary."));
+    await w.tick();
+    // A scheduler of its own, so its hourly pass is due at once whatever earlier tests' clocks did.
+    const scheduler = createScheduler({ store: w.store, agents: w.agents, directory: w.directory, runner: w.runner, now: () => w.at, onError: (error) => { throw error; } });
+    w.advance(3 * 24 * 60 * MINUTE);
+    await Promise.all(await scheduler.tick());
+    expect(await lastRun(short.teamId, sessions[0]!)).toMatchObject({ transcript: null, result: null, state: "completed" });
+    expect((await lastRun(plain.teamId, sessions[1]!)).transcript).not.toBeNull();
+    // Negative: a retention out of range is refused by the directory.
+    await expect(w.db.query("UPDATE directory.teams SET retention_days = -1 WHERE id = $1", [plain.teamId])).rejects.toThrow();
+  });
 });
 
 describe("the summary while waiting (requirement 0001)", () => {
@@ -407,5 +485,101 @@ describe("the summary while waiting (requirement 0001)", () => {
     await w.tick();
     expect(sentTo(w.anthropic, 2)).toContain("Waiting for which invoice.");
     expect(MODEL).toBeTruthy();
+  });
+});
+
+describe("closing after a run and the cap of active sessions (requirement 0004)", () => {
+  it("AS14: a trigger naming its session with close closes the session after its run. Negative: another agent's session or a closed one is refused", async () => {
+    const { teamId, agent } = await w.team();
+    const first = await hostTrigger(teamId, agent.id, { task: "A" });
+    w.anthropic.script(say("Done A."), say("Summary A."));
+    await w.tick();
+    const closing = await w.work.receive({ teamId, agentId: agent.id, sender: "host", userId: null, event: "task.done", reference: randomUUID(), body: "{}", sessionId: first.sessionId, close: true });
+    expect(closing).toMatchObject({ sessionId: first.sessionId, duplicate: false, queued: false });
+    expect(await w.store.forTeam(teamId).findSession(first.sessionId)).toMatchObject({ state: "open", closeAfterRun: true });
+    w.anthropic.script(say("Wrapped up."), say("Summary: done."));
+    await w.tick();
+    await w.tick();
+    expect(await w.store.forTeam(teamId).findSession(first.sessionId)).toMatchObject({ state: "closed", closeReason: "closed" });
+    expect((await runsOf(teamId, first.sessionId)).map((r) => r.state)).toEqual(["completed", "completed"]);
+
+    await expect(w.work.receive({ teamId, agentId: agent.id, sender: "host", userId: null, event: "e", reference: randomUUID(), body: "", sessionId: first.sessionId, close: true })).rejects.toMatchObject({ code: "closed" });
+    const other = newAgent(teamId, { profileId: agent.profileId });
+    await w.agents.forTeam(teamId).insertAgent(other);
+    const theirs = await hostTrigger(teamId, other.id);
+    await expect(w.work.receive({ teamId, agentId: agent.id, sender: "host", userId: null, event: "e", reference: randomUUID(), body: "", sessionId: theirs.sessionId, close: true })).rejects.toMatchObject({ code: "not-found" });
+    expect(await w.store.forTeam(teamId).findSession(theirs.sessionId)).toMatchObject({ state: "open", closeAfterRun: false });
+  });
+
+  it("AS15: a trigger beyond the agent's cap is accepted as queued, never refused; its run starts once one of the agent's runs stops working, the oldest first; the same reference again starts it once", async () => {
+    const { teamId, agent } = await w.team({ maxActiveSessions: 1 });
+    let during: Promise<[Awaited<ReturnType<typeof hostTrigger>>, Awaited<ReturnType<typeof hostTrigger>>]> | undefined;
+    const references = [randomUUID(), randomUUID()];
+    w.hostTools.push({
+      name: "read_ledger",
+      readOnly: true,
+      answer: () => {
+        during = (async () => [await hostTrigger(teamId, agent.id, { task: "B" }, references[0]), await hostTrigger(teamId, agent.id, { task: "C" }, references[1])] as [Awaited<ReturnType<typeof hostTrigger>>, Awaited<ReturnType<typeof hostTrigger>>])();
+        return { text: "Ledger read." };
+      },
+    });
+    const a = await hostTrigger(teamId, agent.id, { task: "A" });
+    expect(a).toMatchObject({ queued: false });
+    w.anthropic.script(call("read_ledger"), say("Done A."), say("Summary A."));
+    await w.tick();
+    const [b, c] = await during!;
+    expect(b).toMatchObject({ duplicate: false, queued: true });
+    expect(c).toMatchObject({ duplicate: false, queued: true });
+    expect(await hostTrigger(teamId, agent.id, { task: "C again" }, references[1])).toEqual({ ...c, duplicate: true });
+    expect((await lastRun(teamId, a.sessionId)).state).toBe("completed");
+
+    w.anthropic.script(say("Done B."), say("Summary B."));
+    await w.tick();
+    expect((await lastRun(teamId, b.sessionId)).state, "the oldest first").toBe("completed");
+    expect(await runsOf(teamId, c.sessionId)).toEqual([expect.objectContaining({ state: "queued" })]);
+    w.anthropic.script(say("Done C."), say("Summary C."));
+    await w.tick();
+    expect(await runsOf(teamId, c.sessionId), "started once").toEqual([expect.objectContaining({ state: "completed" })]);
+    expect(sentTo(w.anthropic, -2)).toContain("C");
+    expect(sentTo(w.anthropic, -2)).not.toContain("C again");
+  });
+
+  it("negative (AS15): a session waiting on a person does not hold the cap", async () => {
+    const { teamId, agent } = await w.team({ maxActiveSessions: 1 });
+    const asking = await hostTrigger(teamId, agent.id, { task: "A" });
+    w.anthropic.script(call("ask_person", { question: "Which account?" }));
+    await w.tick();
+    expect(await lastRun(teamId, asking.sessionId)).toMatchObject({ state: "input_required" });
+    const next = await hostTrigger(teamId, agent.id, { task: "B" });
+    expect(next).toMatchObject({ queued: false });
+    w.anthropic.script(say("Done B."), say("Summary B."));
+    await w.tick();
+    expect(await lastRun(teamId, next.sessionId)).toMatchObject({ state: "completed" });
+  });
+
+  it("negative (AS15): another agent's run stopping starts nothing for this one; its own stopping does, at the next wake of a scheduler that was not running", async () => {
+    const { teamId, agent } = await w.team({ maxActiveSessions: 1 });
+    const first = await hostTrigger(teamId, agent.id, { task: "A" });
+    // Worked elsewhere: claimed by another instance of the server.
+    const working = await w.store.forTeam(teamId).claim((await lastRun(teamId, first.sessionId)).id, w.at);
+    expect(working).toMatchObject({ state: "working" });
+    const waiting = await hostTrigger(teamId, agent.id, { task: "B" });
+    expect(waiting).toMatchObject({ queued: true });
+
+    const other = newAgent(teamId, { profileId: agent.profileId, maxActiveSessions: 1 });
+    await w.agents.forTeam(teamId).insertAgent(other);
+    const theirs = await hostTrigger(teamId, other.id, { task: "X" });
+    w.anthropic.script(say("Done X."), say("Summary X."));
+    await w.tick();
+    expect(await lastRun(teamId, theirs.sessionId)).toMatchObject({ state: "completed" });
+    await w.tick();
+    expect(await lastRun(teamId, waiting.sessionId)).toMatchObject({ state: "queued" });
+    expect(w.anthropic.requests).toHaveLength(2);
+
+    await w.work.stopRun(teamId, working!.id);
+    const woken = createScheduler({ store: w.store, agents: w.agents, directory: w.directory, runner: w.runner, now: () => w.at, onError: (error) => { throw error; } });
+    w.anthropic.script(say("Done B."), say("Summary B."));
+    await Promise.all(await woken.tick());
+    expect(await lastRun(teamId, waiting.sessionId)).toMatchObject({ state: "completed" });
   });
 });

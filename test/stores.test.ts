@@ -7,7 +7,7 @@ import { database, newAgent, newProfile, T0 } from "./support/db.js";
 /**
  * The stores on real Postgres semantics (PGlite), as a role row-level
  * security applies to: requirement 0001 (RN1, RN2, RN20) and requirement
- * 0004 (AS1, AS6, AS10). Every test works in teams of its own.
+ * 0004 (AS1, AS6, AS10, AS14, AS15). Every test works in teams of its own.
  */
 
 let db: PGlite;
@@ -42,6 +42,7 @@ async function teamWithSession(sessionOverrides: Partial<Session> = {}) {
     updatedAt: T0,
     lastActivityAt: T0,
     closedAt: null,
+    closeAfterRun: false,
     version: 1,
     ...sessionOverrides,
   };
@@ -65,7 +66,7 @@ describe("the runs store (requirement 0001)", () => {
     expect((await team.listSessions({ state: "closed" })).map((s) => s.id)).toEqual([session.id]);
   });
 
-  it("RN2: of two claims of one queued run one wins, starting its slice; one working run per agent; one open run per session", async () => {
+  it("RN2: of two claims of one queued run one wins, starting its slice; one open run per session", async () => {
     const { team, session, teamId, agent } = await teamWithSession();
     const queued = runOf(session);
     await team.insertRun(queued);
@@ -74,16 +75,41 @@ describe("the runs store (requirement 0001)", () => {
     expect([a, b].filter(Boolean)).toHaveLength(1);
     expect((a ?? b)!).toMatchObject({ state: "working", claimedAt: T0, sliceStartedAt: T0 });
     await expect(team.insertRun(runOf(session)), "a second open run of the session").rejects.toMatchObject({ code: "23505" });
-    // Another session of the same agent: queued, but not claimed while the first works.
-    const other: Session = { ...session, id: randomUUID() };
-    await team.insertSession(other);
-    const second = runOf(other);
-    await team.insertRun(second);
-    expect(await team.claim(second.id, at)).toBeUndefined();
     expect(await runs.findRun(queued.id)).toEqual({ id: queued.id, teamId, agentId: agent.id, sessionId: session.id, state: "working", sliceStartedAt: T0 });
   });
 
-  it("RN2: due runs by priority, due date, then age, one per agent; a run queued for later (a task's next poll) waits", () => {
+  it("AS15: claims of an agent's queued runs, at once, make at most its cap working; a run waiting on a person or ended frees a place; another agent's runs neither hold nor free one", async () => {
+    const { team, session, teamId, agent } = await teamWithSession();
+    await agents.forTeam(teamId).updateAgent(agent.id, agent.version, { maxActiveSessions: 2 });
+    const sessionFor = async (agentId = agent.id) => {
+      const other: Session = { ...session, id: randomUUID(), agentId };
+      await team.insertSession(other);
+      return other;
+    };
+    const queued = [runOf(session), runOf(await sessionFor()), runOf(await sessionFor())];
+    for (const run of queued) await team.insertRun(run);
+    // Another agent of the team at its own cap of 1, working.
+    const otherAgent = newAgent(teamId, { maxActiveSessions: 1 });
+    await agents.forTeam(teamId).insertAgent(otherAgent);
+    const theirs = runOf(await sessionFor(otherAgent.id));
+    await team.insertRun(theirs);
+    expect(await team.claim(theirs.id, new Date(T0))).toMatchObject({ state: "working" });
+
+    const claimed = await Promise.all(queued.map((run) => team.claim(run.id, new Date(T0))));
+    expect(claimed.filter(Boolean), "two of three at the cap of 2, the other agent's working run not counted").toHaveLength(2);
+    const waiting = queued[claimed.findIndex((run) => run === undefined)]!;
+    expect(await team.findRun(waiting.id)).toMatchObject({ state: "queued" });
+
+    // The other agent's run ending frees nothing for this one.
+    await team.updateRun(theirs.id, 2, { state: "completed", endedAt: T0, sliceStartedAt: null });
+    expect(await team.claim(waiting.id, new Date(T0))).toBeUndefined();
+    // One of this agent's runs waiting on a person frees a place.
+    const first = claimed.find(Boolean)!;
+    await team.updateRun(first.id, first.version, { state: "input_required", sliceStartedAt: null, waitingOn: { kind: "question", callId: "c1", questionId: randomUUID() } });
+    expect(await team.claim(waiting.id, new Date(T0))).toMatchObject({ state: "working" });
+  });
+
+  it("RN2: due runs by priority, due date, then age, as many per agent as its cap leaves; a run queued for later (a task's next poll) waits", () => {
     const s = { id: "s", agentId: "a1", teamId: "t" };
     const low = runOf(s, { priority: "low", queuedAt: later(-10) });
     const highLate = runOf(s, { priority: "high", dueOn: "2026-12-01" });
@@ -91,8 +117,11 @@ describe("the runs store (requirement 0001)", () => {
     const otherAgent = runOf({ ...s, agentId: "a2" }, { queuedAt: later(5) });
     const busy = runOf({ ...s, agentId: "a3" }, { state: "working" });
     const blocked = runOf({ ...s, agentId: "a3" });
-    expect(dueRuns([low, highLate, highSoon, otherAgent, busy, blocked], new Date(T0)).map((r) => r.id)).toEqual([highSoon.id]);
-    expect(dueRuns([low, otherAgent], new Date(later(5))).map((r) => r.id)).toEqual([low.id, otherAgent.id]);
+    const one = () => 1;
+    expect(dueRuns([low, highLate, highSoon, otherAgent, busy, blocked], new Date(T0), one).map((r) => r.id)).toEqual([highSoon.id]);
+    expect(dueRuns([low, otherAgent], new Date(later(5)), one).map((r) => r.id)).toEqual([low.id, otherAgent.id]);
+    const caps: Record<string, number> = { a1: 2, a3: 2 };
+    expect(dueRuns([low, highLate, highSoon, busy, blocked], new Date(T0), (id) => caps[id]!).map((r) => r.id)).toEqual([highSoon.id, highLate.id, blocked.id]);
   });
 
   it("RN2: a run's changes by compare-and-set; steps stored in order, a number once", async () => {
@@ -134,6 +163,25 @@ describe("the runs store (requirement 0001)", () => {
     expect(await idle.team.findSession(idle.session.id)).toMatchObject({ state: "closed", closeReason: "idle" });
     expect(await busy.team.closeIdleSessions(before, new Date(T0))).toBe(0);
     expect(await touched.team.closeIdleSessions(before, new Date(T0))).toBe(0);
+  });
+
+  it("AS14: a session to close after its run closes once it has no open run and no trigger waiting; it is not closed before", async () => {
+    const { team, session } = await teamWithSession();
+    expect(await team.closeAfterRun(session.id)).toBe(true);
+    expect(await team.findSession(session.id)).toMatchObject({ state: "open", closeAfterRun: true });
+    const run = runOf(session);
+    await team.insertRun(run);
+    expect(await team.closeFinishedSessions(new Date(T0)), "its run open").toBe(0);
+    await team.updateRun(run.id, 1, { state: "completed", endedAt: T0 });
+    const trigger = { id: randomUUID(), teamId: session.teamId, sessionId: session.id, agentId: session.agentId, sender: "host" as const, userId: null, event: "e", reference: randomUUID(), body: sealed, receivedAt: T0, runId: null };
+    await team.insertTrigger(trigger);
+    expect(await team.closeFinishedSessions(new Date(T0)), "a trigger waiting").toBe(0);
+    await team.deliverTriggers([trigger.id], run.id);
+    const untouched = await teamWithSession();
+    expect(await team.closeFinishedSessions(new Date(later(1)))).toBe(1);
+    expect(await team.findSession(session.id)).toMatchObject({ state: "closed", closeReason: "closed", closedAt: later(1) });
+    expect(await untouched.team.closeFinishedSessions(new Date(later(1))), "a session not asked to close").toBe(0);
+    expect(await team.closeAfterRun(session.id), "a closed session").toBe(false);
   });
 
   it("RN20: transcripts, summaries, results and delivered triggers' bodies are purged for runs ended before the cutoff; the facts stay; a recent run keeps them", async () => {

@@ -56,9 +56,16 @@
   admins, a personal agent's owner. A session is active while its run is
   `working`; a session waiting on a person (`input_required`,
   `auth_required`), an idle one and a closed one do not count, so an
-  agent may hold more open sessions than its cap. The cap is stored and
-  shown; enforcing it (a run beyond it waits as `queued` until one of the
-  agent's runs stops working) is not built yet.
+  agent may hold more open sessions than its cap. A trigger is never
+  refused for the cap: a run beyond it waits as `queued` (the trigger's
+  answer says `queued: true`) until one of the agent's runs stops working,
+  then the queued runs start in the queue's order (priority, due date,
+  then the oldest), as many as the cap leaves. The claim counts the
+  agent's working runs under a lock on the agent, so runs started at once
+  never pass the cap. A waiting run is picked up at the scheduler's first
+  pass after a place frees, a server's first pass after a start included.
+  Several runs of one agent working at once share its credentials: a token
+  one of them renewed is taken by the others.
 - **Safety controls.** A team admin may stop or pause any agent of the
   team, a personal one included. Editing a personal agent stays its
   owner's.
@@ -88,9 +95,11 @@
   triggers in the order they arrived: a trigger for a session with a
   working run reaches that run at its next step, one for a waiting run
   when it resumes, one for an idle session queues its next run.
-- **Ending.** Its owners close a session through the API, or it closes
-  after 7 days without a trigger or a run. A closed session takes no more
-  triggers.
+- **Ending.** Its owners close a session through the API, a trigger may
+  ask to close it after its run (`close`), or it closes after 7 days
+  without a trigger or a run. A session asked to close closes once its run
+  has ended and no trigger waits; it takes triggers until then. A closed
+  session takes no more triggers.
 - **Owners** are users of the session's team. The first owners are the ones
   the trigger names, else the person who started it through the API, else
   the agent's default owners (a personal agent's owner always among
@@ -116,8 +125,16 @@
 - **Triggers are pushed.** A trigger names the team, the agent, what
   happened (an event name), a reference its sender chose (the same
   reference for the same agent starts work once), and optionally a session
-  to continue, its owners, a priority and a due date. Its body is data for
-  the agent, sealed at rest. The server pulls work from nowhere.
+  to continue, its owners, a priority, a due date and `close` (close the
+  session after this trigger's run). Its body is data for the agent,
+  sealed at rest. The server pulls work from nowhere.
+- **The host's `POST /triggers`** takes `{ teamId, agentId, event,
+  reference, body?, sessionId?, ownerUserIds?, priority?, dueOn?, close? }`
+  and answers `{ sessionId, triggerId, duplicate, queued }`: `202` for a
+  new trigger, `200` for a reference sent before (`duplicate: true`).
+  `queued` is true while the session's run waits for a free session (the
+  agent's cap of active sessions); the run's state is then `queued`, in
+  the API and in the host's view `host_runs`.
 - **Who may send.** The installation's host, for any team
   ([ADR 0006](../adr/0006-the-host.md)). A credential per team for other
   senders is a later adapter of the same port. People start and continue
@@ -126,14 +143,26 @@
   server keeps the question sealed, lists it to the session's owners,
   takes the answer and resumes the run. Runner questions go to the owners
   the same way, answered *Continue* or *Stop*. An answer never widens a
-  grant or approves an action. The host webhook hears of each new question
-  and of each run that ends or waits; a webhook per team is a later
-  adapter.
+  grant or approves an action. `GET /teams/:teamId/questions` lists the
+  open questions of the sessions the caller owns (every member's for a
+  session without owners), each with its session, agent, kind, text and
+  its run's priority and due date (the trigger's), so a host can order
+  them beside its own items; `POST …/questions/:id/answer` answers as the
+  caller. The host webhook hears of each new question, each answer and
+  each run that ends or waits, by ids and kinds only: never a question's
+  text or answer, which people read through the API. A webhook per team
+  is a later adapter.
 - **Held actions are the service's,** as MCP tasks
   ([ADR 0004](../adr/0004-open-protocols.md)). A service answers a held call
   with a task; the run parks on its id and continues when the task is
   `completed`, `failed` or `cancelled`. The server polls no faster than the
-  task's `pollIntervalMs` and never answers its `inputRequests` itself.
+  task's `pollIntervalMs` and never answers its `inputRequests` itself,
+  except when told: a trigger whose `reference` is the task's id, sent to
+  the session whose open run waits on that task, makes the run due at once
+  (a host whose held call was decided says so this way). Such a trigger is
+  stored and deduplicated like any other, but only wakes the run: it is
+  handed to that run unread, starts no run and adds no message, the task's
+  outcome being what the run reads.
   Holding tool calls in the server itself is for later, for services that
   cannot hold.
 - **A task service is optional** (not built yet). A team may mark one connection as its
@@ -202,7 +231,6 @@ review.
 - A team's task service and memory connection, and coordinators
   ([requirement 0005](0005-coordinators-and-memory.md)).
 - Usage limits per team, agent and user.
-- Enforcing an agent's cap of active sessions (`maxActiveSessions`).
 - Owners correcting a session's summary (they read it today).
 - Trigger senders with a credential for one team, and a webhook per team.
 - Delivering webhook events through an outbox: today an event is tried
@@ -224,12 +252,15 @@ the services with the fake MCP server over real HTTP.
 | AS6 | A connection's name once per team; one credential per agent and connection; with a key from the service the agent sees its tools as `<connection>__<tool>`; a refused key waits for a person (`auth_required`) and a new key resumes the run. Negative: another team's connections and credentials are never listed, found, changed or deleted | `test/server/api.test.ts`, `test/stores.test.ts` |
 | AS7 | OAuth: a person signs the agent in at the service (client ID metadata document, PKCE, `resource`, `iss`); a pending sign-in is taken once, before it expires; a refused token is renewed; a grant that cannot be renewed, or a missing scope, waits for the next sign-in, which asks for the wider scope and resumes the run. Negative: an unknown state, an error from the service or another issuer signs nobody in; a key connection refuses OAuth and the other way round | `test/server/api.test.ts`, `test/stores.test.ts` |
 | AS8 | The same reference starts work once; a trigger naming the session starts its next run from the last summary. Negative: another team's agent, a closed session, a malformed event or a body over 64 KiB starts nothing | `test/runner.test.ts` |
-| AS9 | `ask_person` keeps the question sealed for the session's owners; only an owner answers; the answer resumes the run with what arrived meanwhile | `test/runner.test.ts` |
+| AS9 | `ask_person` keeps the question sealed for the session's owners; only an owner answers; the answer resumes the run with what arrived meanwhile; the list names each question's agent and its run's priority and due date. Negative: neither the question's text nor the answer is in an event | `test/runner.test.ts`, `test/server/api.test.ts` |
 | AS10 | Triggers are delivered to one run, in order; a session closes after 7 days idle only without an open run; usage adds up per day, agent and user; the hourly pass purges old transcripts and closes idle sessions | `test/stores.test.ts`, `test/runner.test.ts` |
 | AS11 | Usage per team for its admins; an installation admin sees each team's totals, never its sessions | `test/server/api.test.ts` |
-| AS12 | The host webhook: each event POSTed signed by Standard Webhooks, a failed delivery tried again, three times in all; with an identity, each delivery carries a fresh token instead of a signature | `test/notify.test.ts` |
+| AS12 | The host webhook: each event (`question.created`, `question.answered`, `run.waiting`, `run.ended`, ids and kinds only) POSTed signed by Standard Webhooks, a failed delivery tried again, three times in all; with an identity, each delivery carries a fresh token instead of a signature | `test/notify.test.ts` |
 | AS13 | A new agent's cap of active sessions is 3; a team admin changes a team agent's, its owner a personal agent's, on creating or by `PATCH`. Negative: a member who is neither 403; below 1, above 100 or not an integer 400, nothing changed | `test/server/api.test.ts` |
+| AS14 | A trigger naming its session with `close` closes the session once its run has ended and no trigger waits, not before; the answer and the session say so. Negative: `close` that is not a boolean is 400; another agent's session is 404, a closed one 409, and neither is changed | `test/runner.test.ts`, `test/stores.test.ts`, `test/server/api.test.ts` |
+| AS15 | A trigger beyond the agent's cap of active sessions is `202` with `queued: true`, its run `queued` until one of the agent's runs stops working, then the oldest starts first; claims at once never pass the cap; a waiting run starts at a fresh scheduler's first pass; two runs of one agent share a renewed OAuth token. Negative: never refused for the cap; the same reference again starts it once; a run waiting on a person does not hold the cap; another agent's run stopping starts nothing for this agent | `test/runner.test.ts`, `test/stores.test.ts`, `test/server/api.test.ts` |
+| AS16 | A trigger whose reference is the task the session's open run waits on makes that run due now, whether it waits `input_required` or sits `queued` for a later poll; the next scheduler pass polls the task; the trigger is stored and deduplicated, starts no run and never reaches the model. Negative: a trigger with another reference polls nothing early; a trigger naming another session's task touches neither run | `test/runner.test.ts` |
 | CN1 | The MCP client speaks the current revision first: no `initialize`, the revision, client and capabilities in `_meta`, the routing headers, JSON or an event stream | `test/mcp.test.ts` |
-| CN2 | A service that speaks only the older revision is initialized and its session kept; a forgotten session is begun again; the revision is recorded | `test/mcp.test.ts` |
+| CN2 | A service that speaks only the older revision is initialized and its session kept, `initialize` and its notification carrying the caller's own headers (a host's run headers), never the routing ones; a forgotten session is begun again; the revision is recorded | `test/mcp.test.ts` |
 | CN3 | A held call answers a task, polled with `tasks/get` to its result or its failure; a service's JSON-RPC error is its refusal; no token is 401 with the challenge | `test/mcp.test.ts` |
 | CN4 | Discovery from the challenge, PKCE with S256, the resource on both requests, the answer's `iss` checked; a client ID metadata document where taken, else registration. Negative: a wrong verifier, another issuer's answer, a missing `iss` where promised, metadata for another resource and a service without metadata are refused | `test/mcp.test.ts` |
