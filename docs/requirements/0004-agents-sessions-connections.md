@@ -150,7 +150,13 @@
   ([ADR 0004](../adr/0004-open-protocols.md)). A service answers a held call
   with a task; the run parks on its id and continues when the task is
   `completed`, `failed` or `cancelled`. The server polls no faster than the
-  task's `pollIntervalMs` and never answers its `inputRequests` itself.
+  task's `pollIntervalMs` and never answers its `inputRequests` itself,
+  except when told: a trigger whose `reference` is the task's id, sent to
+  the session whose open run waits on that task, makes the run due at once
+  (a host whose held call was decided says so this way). Such a trigger is
+  stored and deduplicated like any other, but only wakes the run: it is
+  handed to that run unread, starts no run and adds no message, the task's
+  outcome being what the run reads.
   Holding tool calls in the server itself is for later, for services that
   cannot hold.
 - **A task service is optional** (not built yet). A team may mark one connection as its
@@ -247,6 +253,7 @@ the services with the fake MCP server over real HTTP.
 | AS13 | A new agent's cap of active sessions is 3; a team admin changes a team agent's, its owner a personal agent's, on creating or by `PATCH`. Negative: a member who is neither 403; below 1, above 100 or not an integer 400, nothing changed | `test/server/api.test.ts` |
 | AS14 | A trigger naming its session with `close` closes the session once its run has ended and no trigger waits, not before; the answer and the session say so. Negative: `close` that is not a boolean is 400; another agent's session is 404, a closed one 409, and neither is changed | `test/runner.test.ts`, `test/stores.test.ts`, `test/server/api.test.ts` |
 | AS15 | A trigger beyond the agent's cap of active sessions is `202` with `queued: true`, its run `queued` until one of the agent's runs stops working, then the oldest starts first; claims at once never pass the cap; a waiting run starts at a fresh scheduler's first pass; two runs of one agent share a renewed OAuth token. Negative: never refused for the cap; the same reference again starts it once; a run waiting on a person does not hold the cap; another agent's run stopping starts nothing for this agent | `test/runner.test.ts`, `test/stores.test.ts`, `test/server/api.test.ts` |
+| AS16 | A trigger whose reference is the task the session's open run waits on makes that run due now, whether it waits `input_required` or sits `queued` for a later poll; the next scheduler pass polls the task; the trigger is stored and deduplicated, starts no run and never reaches the model. Negative: a trigger with another reference polls nothing early; a trigger naming another session's task touches neither run | `test/runner.test.ts` |
 | CN1 | The MCP client speaks the current revision first: no `initialize`, the revision, client and capabilities in `_meta`, the routing headers, JSON or an event stream | `test/mcp.test.ts` |
 | CN2 | A service that speaks only the older revision is initialized and its session kept, `initialize` and its notification carrying the caller's own headers (a host's run headers), never the routing ones; a forgotten session is begun again; the revision is recorded | `test/mcp.test.ts` |
 | CN3 | A held call answers a task, polled with `tasks/get` to its result or its failure; a service's JSON-RPC error is its refusal; no token is 401 with the challenge | `test/mcp.test.ts` |

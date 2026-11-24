@@ -6,7 +6,7 @@ import { call, MODEL, say, sentTo, startWorld, type World } from "./support/worl
 
 /**
  * The runner, the scheduler and work intake together (requirement 0001,
- * RN3–RN13; requirement 0004, AS3–AS5, AS8–AS10, AS14, AS15): real Postgres
+ * RN3–RN13; requirement 0004, AS3–AS5, AS8–AS10, AS14–AS16): real Postgres
  * semantics, a fake Anthropic API and a fake host MCP service.
  */
 
@@ -34,8 +34,8 @@ const lookup = { name: "read_invoice", readOnly: true, answer: (args: Record<str
 const book = { name: "book_invoice", answer: () => ({ text: "Booked." }) };
 
 /** A trigger from the host for the agent. */
-async function hostTrigger(teamId: string, agentId: string, body: unknown = { task: "Book invoice 7" }, reference = randomUUID(), sessionId?: string) {
-  return w.work.receive({ teamId, agentId, sender: "host", userId: null, event: "task.assigned", reference, body: JSON.stringify(body), ...(sessionId ? { sessionId } : {}) });
+async function hostTrigger(teamId: string, agentId: string, body: unknown = { task: "Book invoice 7" }, reference: string = randomUUID(), sessionId?: string, event = "task.assigned") {
+  return w.work.receive({ teamId, agentId, sender: "host", userId: null, event, reference, body: JSON.stringify(body), ...(sessionId ? { sessionId } : {}) });
 }
 const runsOf = async (teamId: string, sessionId: string) => w.store.forTeam(teamId).listRuns({ sessionId });
 const lastRun = async (teamId: string, sessionId: string) => (await runsOf(teamId, sessionId)).at(-1)!;
@@ -206,6 +206,62 @@ describe("waiting and resuming (requirements 0001, 0004)", () => {
     await w.tick();
     expect(await lastRun(teamId, sessionId)).toMatchObject({ state: "completed" });
     expect(sentTo(w.anthropic, 1)).toContain("Sent.");
+  });
+
+  it("AS16: a host trigger whose reference is the task the session's run waits on makes it due at once", async () => {
+    w.hostTools.push({ name: "send_mail", answer: () => ({ task: {} }) });
+    const { teamId, agent } = await w.team();
+    const { sessionId } = await hostTrigger(teamId, agent.id);
+    w.anthropic.script(call("send_mail", {}));
+    await w.tick();
+    const taskId = ((await lastRun(teamId, sessionId)).waitingOn as { taskId: string }).taskId;
+    w.host.settle(taskId, { status: "input_required" });
+    w.advance(10_000);
+    await w.tick();
+    w.host.settle(taskId, { status: "completed", result: { text: "Sent." } });
+    // Negative: another reference polls nothing early.
+    await hostTrigger(teamId, agent.id, { note: "other" }, randomUUID(), sessionId, "approval.decided");
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(1);
+    const wake = await hostTrigger(teamId, agent.id, { note: "WAKE-BODY" }, taskId, sessionId, "approval.decided");
+    expect(wake).toMatchObject({ sessionId, duplicate: false });
+    // Stored and deduped as any trigger.
+    expect(await hostTrigger(teamId, agent.id, { note: "again" }, taskId, sessionId, "approval.decided")).toMatchObject({ triggerId: wake.triggerId, duplicate: true });
+    w.anthropic.script(say("Sent it."), say("Summary."));
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(2);
+    expect(await lastRun(teamId, sessionId)).toMatchObject({ state: "completed" });
+    expect(sentTo(w.anthropic, 1)).toContain("Sent.");
+    // It only woke the poll: no run of its own, its body never shown to the model.
+    expect(await runsOf(teamId, sessionId)).toHaveLength(1);
+    expect(w.anthropic.requests.map((r) => JSON.stringify(r.body)).join("")).not.toContain("WAKE-BODY");
+  });
+
+  it("AS16: a run waiting on a working task, queued for a later poll, is polled at once by its task's trigger; another session's trigger touches nothing", async () => {
+    w.hostTools.push({ name: "send_mail", answer: () => ({ task: { pollIntervalMs: 60_000 } }) });
+    const { teamId, agent } = await w.team();
+    const a = await hostTrigger(teamId, agent.id);
+    const b = await hostTrigger(teamId, agent.id);
+    w.anthropic.script(call("send_mail", {}), call("send_mail", {}));
+    await w.tick();
+    const waitingA = await lastRun(teamId, a.sessionId);
+    const waitingB = await lastRun(teamId, b.sessionId);
+    const taskA = (waitingA.waitingOn as { taskId: string }).taskId;
+    expect(waitingA).toMatchObject({ state: "queued", waitingOn: { kind: "task", status: "working" } });
+    // Negative: B's task named by a trigger on A's session wakes neither (a reference is taken once per agent and sender).
+    await hostTrigger(teamId, agent.id, {}, (waitingB.waitingOn as { taskId: string }).taskId, a.sessionId, "approval.decided");
+    expect(await lastRun(teamId, a.sessionId)).toMatchObject({ id: waitingA.id, version: waitingA.version, queuedAt: waitingA.queuedAt });
+    expect(await lastRun(teamId, b.sessionId)).toMatchObject({ id: waitingB.id, version: waitingB.version, queuedAt: waitingB.queuedAt });
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(0);
+    w.host.settle(taskA, { status: "completed", result: { text: "Sent." } });
+    await hostTrigger(teamId, agent.id, {}, taskA, a.sessionId, "approval.decided");
+    expect(await lastRun(teamId, a.sessionId)).toMatchObject({ state: "queued", queuedAt: w.at.toISOString() });
+    w.anthropic.script(say("Sent it."), say("Summary."));
+    await w.tick();
+    expect(w.host.requests.filter((r) => r.body?.method === "tasks/get")).toHaveLength(1);
+    expect(await lastRun(teamId, a.sessionId)).toMatchObject({ state: "completed" });
+    expect((await lastRun(teamId, b.sessionId)).state).toBe("queued");
   });
 
   it("RN7: after 15 minutes the run is queued again from its stored steps, never ended", async () => {

@@ -45,7 +45,7 @@ installation already knows.
 5. **A host on the same database reads two views, nothing else.** The
    server's migrations add `agent_server.host_runs` (a run's id, team,
    agent, state, slice end and latest step: what admitting a call as the
-   run takes) and `agent_server.host_agents` (an agent's id, team, owner
+   run takes; and its session, to address a trigger to it) and `agent_server.host_agents` (an agent's id, team, owner
    and removal). The installation grants the host's role `SELECT` on them
    alone. A view reads as its owner, so across teams, and holds no content
    column: no transcript, summary, question or setting. The host reads the

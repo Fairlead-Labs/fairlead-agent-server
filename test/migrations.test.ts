@@ -46,7 +46,7 @@ describe("migrations (requirement 0002)", () => {
     await migrateDatabase(db);
     const columns = async (view: string) =>
       (await db.query<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position", [SERVER_SCHEMA, view])).rows.map((r) => r.column_name);
-    expect(await columns("host_runs")).toEqual(["id", "team_id", "agent_id", "state", "slice_ends_at", "step_id"]);
+    expect(await columns("host_runs")).toEqual(["id", "team_id", "agent_id", "state", "slice_ends_at", "step_id", "session_id"]);
     expect(await columns("host_agents")).toEqual(["id", "team_id", "owner_user_id", "removed_at"]);
 
     const [teamA, teamB, agentA, agentB, owner, session, run, idle, firstStep, lastStep] = ["team-a", "team-b", randomUUID(), randomUUID(), "user-1", randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
@@ -70,8 +70,8 @@ describe("migrations (requirement 0002)", () => {
     await db.exec(`CREATE ROLE host NOSUPERUSER; GRANT USAGE ON SCHEMA ${SERVER_SCHEMA} TO host; GRANT SELECT ON ${SERVER_SCHEMA}.host_runs, ${SERVER_SCHEMA}.host_agents TO host; SET ROLE host`);
     const runs = (await db.query(`SELECT * FROM ${SERVER_SCHEMA}.host_runs ORDER BY state DESC`)).rows;
     expect(runs).toEqual([
-      { id: run, team_id: teamA, agent_id: agentA, state: "working", slice_ends_at: new Date("2026-11-23T09:15:00Z"), step_id: lastStep },
-      { id: idle, team_id: teamA, agent_id: agentA, state: "completed", slice_ends_at: null, step_id: null },
+      { id: run, team_id: teamA, agent_id: agentA, state: "working", slice_ends_at: new Date("2026-11-23T09:15:00Z"), step_id: lastStep, session_id: session },
+      { id: idle, team_id: teamA, agent_id: agentA, state: "completed", slice_ends_at: null, step_id: null, session_id: session },
     ]);
     expect((await db.query(`SELECT * FROM ${SERVER_SCHEMA}.host_agents ORDER BY team_id`)).rows).toEqual([
       { id: agentA, team_id: teamA, owner_user_id: null, removed_at: null },

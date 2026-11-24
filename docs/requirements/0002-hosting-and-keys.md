@@ -57,7 +57,7 @@ scheduler in the same process.
   so a cut-off write is a runner question).
 - **A host on the same database** reads the run in the view
   `agent_server.host_runs` instead: `id`, `team_id`, `agent_id`, `state`,
-  `slice_ends_at`, `step_id` (the run's latest step), no content; and an
+  `slice_ends_at`, `step_id` (the run's latest step), `session_id`, no content; and an
   agent in `agent_server.host_agents`: `id`, `team_id`, `owner_user_id`,
   `removed_at` ([ADR 0006](../adr/0006-the-host.md) §5). The installation
   grants its role those views alone.
@@ -113,7 +113,7 @@ work sent twice is done once, and one failing run does not stop the rest.
 | HK11 | The database is migrated at the start, each migration once and recorded; the server starts with no host at all. Negative: a migration changed after it was applied, an unknown one or a failing one stops it and changes nothing; a database that cannot be reached stops the start, its URL never echoed | `test/migrations.test.ts`, `test/server/startup-config.test.ts` |
 | HK12 | The server's tables and ledger are in the schema `agent_server`, the directory's in `directory`, each connection finding the server's own. Negative: another product's tables in `public`, `agents` and `schema_migrations` among them, are neither read nor changed | `test/migrations.test.ts`, `test/server/startup-config.test.ts` |
 | HK13 | `CORS_ORIGINS`' origins get their preflights answered and their calls' `Access-Control-Allow-Origin`, on the agents' API and the directory's. Negative: another origin, or any while none is configured, gets no CORS header; a value that is not https (http only on loopback), has a path, a query or an empty entry, or is not a URL stops the start, never echoed | `test/server/api.test.ts`, `test/server/startup-config.test.ts` |
-| HK14 | The host views list exactly their columns: `host_runs` id, team, agent, state, slice end, latest step; `host_agents` id, team, owner, removed; read across teams. Negative: no content column; a role granted only the views reads no table of the schema | `test/migrations.test.ts` |
+| HK14 | The host views list exactly their columns: `host_runs` id, team, agent, state, slice end, latest step, session; `host_agents` id, team, owner, removed; read across teams. Negative: no content column; a role granted only the views reads no table of the schema | `test/migrations.test.ts` |
 | HK15 | The package export `./server` boots the server from options (health, CORS, sign-in, agents, the host's trigger worked to its end), reading no environment | `test/server/server-export.test.ts` |
 | HK7 | A team's first seal makes its key, wrapped under an AAD naming team and key; later seals and other processes reuse it; two first seals at once store one key. Negative: a value opens only for its team and purpose, untouched, under its key; a wrapped key moved to another team's row does not unwrap; a refusing key service leaves nothing stored or sealed | `test/keys.test.ts`, `test/server/startup-config.test.ts` |
 | HK8 | `KeyWrapper` is the only thing the sealer knows of a key service; Cloud KMS is one adapter | `test/keys.test.ts` |

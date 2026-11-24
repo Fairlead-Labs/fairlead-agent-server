@@ -104,7 +104,7 @@ else of the schema ([ADR 0006](adr/0006-the-host.md) §5). Grant its role
 
 | View | Columns |
 | --- | --- |
-| `host_runs` | `id`, `team_id`, `agent_id`, `state`, `slice_ends_at` (null while the run holds no slice), `step_id` (its latest step, the one a call in progress names) |
+| `host_runs` | `id`, `team_id`, `agent_id`, `state`, `slice_ends_at` (null while the run holds no slice), `step_id` (its latest step, the one a call in progress names), `session_id` |
 | `host_agents` | `id`, `team_id`, `owner_user_id` (null for a team agent), `removed_at` |
 
 A host that boots the server in its own tests imports `createServer` from

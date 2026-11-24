@@ -109,7 +109,8 @@ export function createWork({
      * A trigger in: the session it started or continued, whether its sender
      * had sent this reference before (then nothing new is queued), and
      * whether its session's run waits for a free session (the agent's cap of
-     * active sessions). Never refused for the cap.
+     * active sessions). Never refused for the cap. A trigger whose reference
+     * is the task the session's open run waits on makes that run due now.
      */
     async receive(input: TriggerInput): Promise<{ sessionId: string; triggerId: string; duplicate: boolean; queued: boolean }> {
       if (!EVENT.test(input.event) || !EVENT.test(input.reference) || Buffer.byteLength(input.body) > MAX_BODY) throw new WorkError("invalid");
@@ -170,6 +171,15 @@ export function createWork({
       if (stored.stored === "exists")
         return { sessionId: stored.trigger.sessionId, triggerId: stored.trigger.id, duplicate: true, queued: await waitsForCap(runs, agent!, stored.trigger.sessionId) };
       await runs.touchSession(session.id, trigger.receivedAt);
+      // Its reference is the task the open run waits on: that run's poll is due now, and the trigger,
+      // handed to it, only wakes it (the task's outcome is what the run reads).
+      const waiting = await openRun(runs, session.id);
+      if (waiting?.waitingOn?.kind === "task" && waiting.waitingOn.taskId === input.reference) {
+        await runs.deliverTriggers([trigger.id], waiting.id);
+        await changeRun(runs, waiting.id, (r) =>
+          (r.state === "input_required" || r.state === "queued") && r.waitingOn?.kind === "task" && r.waitingOn.taskId === input.reference ? { state: "queued", queuedAt: at() } : undefined,
+        );
+      }
       await queueRun(runs, session, { priority: input.priority ?? null, dueOn: input.dueOn ?? null });
       if (input.close === true) await runs.closeAfterRun(session.id);
       return { sessionId: session.id, triggerId: trigger.id, duplicate: false, queued: await waitsForCap(runs, agent!, session.id) };
