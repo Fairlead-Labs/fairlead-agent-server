@@ -7,8 +7,8 @@ import type { Profile, ProfileSettings } from "./profiles.js";
  * A space's agents and model profiles (requirements 0001 and 0004): each
  * agent lives in exactly one space (a team, or a user's personal space)
  * and works only there. A team agent has no owner and uses the team's
- * profiles; a personal agent has its user as owner and uses only that
- * user's own profiles. Per team, under row-level security.
+ * profiles; a personal agent has its user as owner and uses the team's
+ * profiles or that user's own. Per team, under row-level security.
  */
 
 /** Each limit `null` for *None* (requirement 0001, *Limits*). The 15-minute slice is the server's own and not here. */
@@ -81,8 +81,8 @@ export interface TeamAgentStore {
 
 export type AgentStore = TeamScoped<TeamAgentStore>;
 
-/** Whether an agent may use a profile: a team agent the team's, a personal agent only its owner's own. */
-export const mayUseProfile = (agent: Pick<Agent, "ownerUserId">, profile: Pick<Profile, "ownerUserId">) => agent.ownerUserId === profile.ownerUserId;
+/** Whether an agent may use a profile: any agent the team's, a personal agent also its owner's own; a team agent never a member's. */
+export const mayUseProfile = (agent: Pick<Agent, "ownerUserId">, profile: Pick<Profile, "ownerUserId">) => profile.ownerUserId === null || agent.ownerUserId === profile.ownerUserId;
 
 type Row = Record<string, unknown>;
 const iso = (value: unknown) => (value === null || value === undefined ? null : new Date(value as string).toISOString());

@@ -19,8 +19,8 @@ import type { TriggerSenders } from "./senders.js";
  * The server's API (requirement 0004, *Managing the server*, *Sessions*,
  * *Work intake*): every call a signed-in user's, judged by their own role in
  * the space it names: a team's admins manage its team agents, profiles and
- * connections; a personal agent and its owner's own profiles are its
- * owner's alone; every member reads the team's sessions, starts work and
+ * connections (every member reads the team's profiles); a personal agent
+ * and its owner's own profiles are its owner's alone; every member reads the team's sessions, starts work and
  * answers the questions of sessions they own. A space the caller is not in
  * is 404. Secrets are write-only. The host's triggers come in by its own
  * credential, and the OAuth callback by its state.
@@ -443,7 +443,8 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
   app.get("/teams/:teamId/profiles", async (c) => {
     const role = await roleIn(c);
     if (!role) return notFound(c, "Team not found");
-    const visible = (await agents.forTeam(teamOf(c)).listProfiles()).filter((p) => (p.ownerUserId === null ? role === "admin" : p.ownerUserId === me(c)));
+    // The team's for every member (their personal agents may use them; secrets are never shown), a member's own for them alone.
+    const visible = (await agents.forTeam(teamOf(c)).listProfiles()).filter((p) => p.ownerUserId === null || p.ownerUserId === me(c));
     return c.json({ profiles: visible.map(profileView) });
   });
 

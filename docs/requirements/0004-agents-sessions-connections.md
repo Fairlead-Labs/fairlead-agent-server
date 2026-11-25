@@ -73,10 +73,11 @@
 - **Behaviour:** the playbooks ship with the server and are refined in this
   repository for everyone. An agent's owner adds free-text instructions.
   Team or personal playbooks are a later step.
-- **Model profiles.** A team's admins keep the team's profiles, which its
-  team agents use. A user keeps their own profiles in a space, which only
-  their personal agents there use, on their own model account. A personal
-  agent never uses the team's profiles. (A vendor's app subscription is
+- **Model profiles.** A team's admins keep the team's profiles, which every
+  agent in the team may use, its members' personal agents included; every
+  member reads them (never a key). A user may also keep their own profiles
+  in a space, which only their personal agents there use, on their own
+  model account; a team agent never uses a member's own profile. (A vendor's app subscription is
   not API access; a profile needs an API address and key, or a cloud
   account of the space.)
 
@@ -244,8 +245,8 @@ the services with the fake MCP server over real HTTP.
 
 | Id | Criterion | Test |
 |----|-----------|------|
-| AS1 | A team's admins keep its agents, profiles and connections; a member reads the agents and connections; secrets are write-only; agents and profiles are changed by compare-and-set, a removed agent found but not listed, a named profile not deleted. Negative: invalid settings are 400 (a limit out of range, an unknown time zone, a connection name or address that is not one, another team's profile); another team's agents and profiles are never found, changed or deleted | `test/server/api.test.ts`, `test/stores.test.ts` |
-| AS2 | A member keeps their own personal agent and profiles; the team's admins neither see its profile nor edit it, but pause and remove it; a personal space is its user's alone; a personal agent whose owner left starts no run and works again once they are back. Negative: a personal agent never uses the team's profile | `test/server/api.test.ts`, `test/runner.test.ts` |
+| AS1 | A team's admins keep its agents, profiles and connections; a member reads the agents, the team's profiles and the connections; secrets are write-only; agents and profiles are changed by compare-and-set, a removed agent found but not listed, a named profile not deleted. Negative: invalid settings are 400 (a limit out of range, an unknown time zone, a connection name or address that is not one, another team's profile); another team's agents and profiles are never found, changed or deleted | `test/server/api.test.ts`, `test/stores.test.ts` |
+| AS2 | A member keeps their own personal agent and profiles; the team's admins neither see its profile nor edit it, but pause and remove it; a personal space is its user's alone; a personal agent whose owner left starts no run and works again once they are back; a personal agent may run on the team's profiles. Negative: a team agent never uses a member's own profile, a member never changes the team's | `test/server/api.test.ts`, `test/runner.test.ts` |
 | AS3 | A paused agent starts no run and its working run goes back to the queue; resumed, it goes on; a stopped run is cancelled with its question withdrawn | `test/runner.test.ts` |
 | AS4 | A held call waits on the service's task, polled no faster than its interval and doubling; its outcome is the call's result; a cancelled task is said so; a task waiting on a person at the service puts the run in `input_required` until it completes | `test/runner.test.ts` |
 | AS5 | A member starts work, reads its progress and result and continues it; the owners change owners; an owner closes it. Negative: a member who owns none of a session neither changes its owners, closes it nor answers its question; another team's sessions are 404 | `test/server/api.test.ts` |

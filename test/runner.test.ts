@@ -405,11 +405,23 @@ describe("controls (requirement 0004)", () => {
     expect((await lastRun(teamId, sessionId)).state).toBe("completed");
   });
 
-  it("negative (AS2): a personal agent never runs on the team's profile", async () => {
+  it("AS2: a personal agent runs on the team's profile", async () => {
     const { teamId, member, agent } = await w.team();
     const personal = { ...agent, id: randomUUID(), ownerUserId: member, version: 1 };
     await w.agents.forTeam(teamId).insertAgent(personal);
     const { sessionId } = await hostTrigger(teamId, personal.id);
+    w.anthropic.script(say("Done."), say("Summary."));
+    await w.tick();
+    expect((await lastRun(teamId, sessionId)).state).toBe("completed");
+  });
+
+  it("negative (AS2): a team agent never runs on a member's own profile", async () => {
+    const { teamId, member, agent } = await w.team();
+    const profile = (await w.agents.forTeam(teamId).listProfiles())[0]!;
+    const own = { ...profile, id: randomUUID(), ownerUserId: member, version: 1 };
+    await w.agents.forTeam(teamId).insertProfile(own);
+    await w.agents.forTeam(teamId).updateAgent(agent.id, agent.version, { profileId: own.id });
+    const { sessionId } = await hostTrigger(teamId, agent.id);
     await w.tick();
     expect(await lastRun(teamId, sessionId)).toMatchObject({ state: "failed", stopReason: "no-profile" });
     expect(w.anthropic.requests).toEqual([]);
