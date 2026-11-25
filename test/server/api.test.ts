@@ -92,14 +92,14 @@ describe("managing agents, profiles and connections (requirement 0004)", () => {
   it("AS1: a team's admins keep its agents, profiles and connections; a member reads the agents, the team's profiles and the connections; secrets are write-only", async () => {
     const { teamId, admin, member, outsider } = await team();
     const profile = await request(admin, "POST", `/teams/${teamId}/profiles`, claudeProfile({ apiKey: `sk-${CANARY}` }));
-    expect(profile).toMatchObject({ status: 201, body: { name: "Claude", personal: false, hasApiKey: true } });
+    expect(profile).toMatchObject({ status: 201, body: { name: "Claude", hasApiKey: true } });
     const agent = await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Clerk", profileId: profile.body.id, limits: { steps: 50, inputTokens: null }, timeZone: "Europe/Berlin", language: "de" });
     expect(agent).toMatchObject({ status: 201, body: { name: "Clerk", personal: false, limits: { steps: 50, inputTokens: null, runsPerTrigger: 10 }, timeZone: "Europe/Berlin", language: "de" } });
     const connection = await request(admin, "POST", `/teams/${teamId}/connections`, { name: "crm", url: "https://crm.example.test/mcp", auth: "oauth", oauthClient: { clientId: "agents", clientSecret: `cs-${CANARY}` } });
     expect(connection).toMatchObject({ status: 201, body: { name: "crm", oauthClientId: "agents" } });
     expect((await request(member, "GET", `/teams/${teamId}/agents`)).body.agents.map((a: { id: string }) => a.id)).toEqual([agent.body.id]);
     expect((await request(member, "GET", `/teams/${teamId}/connections`)).status).toBe(200);
-    expect((await request(member, "GET", `/teams/${teamId}/profiles`)).body.profiles).toEqual([expect.objectContaining({ personal: false, hasApiKey: true })]);
+    expect((await request(member, "GET", `/teams/${teamId}/profiles`)).body.profiles).toEqual([expect.objectContaining({ hasApiKey: true })]);
     expect(JSON.stringify((await request(member, "GET", `/teams/${teamId}/profiles`)).body)).not.toMatch(/"apiKey"/);
     const changed = await request(admin, "PATCH", `/teams/${teamId}/agents/${agent.body.id}`, { version: 1, playbook: "Book to cost centre 4711." });
     expect(changed).toMatchObject({ status: 200, body: { version: 2, playbook: "Book to cost centre 4711." } });
@@ -150,20 +150,16 @@ describe("managing agents, profiles and connections (requirement 0004)", () => {
     expect((await request(admin, "POST", `/teams/${teamId}/profiles`, claudeProfile({ provider: "gemini" }))).status).toBe(400);
   });
 
-  it("AS2: a member keeps their own personal agent and profiles; the team's admins neither see its profile nor edit it, but pause and remove it; a personal agent may use the team's profiles, a team agent never a member's own", async () => {
+  it("AS2: a member keeps their own personal agent on the team's profiles, which only the team's admins add, change and delete; the admins never edit the agent, but pause and remove it", async () => {
     const { teamId, admin, member } = await team();
     const teamProfile = await request(admin, "POST", `/teams/${teamId}/profiles`, claudeProfile());
-    const own = await request(member, "POST", `/teams/${teamId}/profiles`, claudeProfile({ personal: true, name: "Mine" }));
-    expect(own).toMatchObject({ status: 201, body: { personal: true, ownerUserId: member.id } });
-    const onTeams = await request(member, "POST", `/teams/${teamId}/agents`, { name: "On the team's", personal: true, profileId: teamProfile.body.id });
-    expect(onTeams).toMatchObject({ status: 201, body: { personal: true, profileId: teamProfile.body.id } });
-    expect((await request(member, "PATCH", `/teams/${teamId}/profiles/${teamProfile.body.id}`, { version: 1, model: "x" })).status).toBe(404);
-    const agent = await request(member, "POST", `/teams/${teamId}/agents`, { name: "Helper", personal: true, profileId: own.body.id });
-    expect(agent).toMatchObject({ status: 201, body: { personal: true, ownerUserId: member.id } });
-    expect((await request(admin, "POST", `/teams/${teamId}/agents`, { name: "Team", profileId: own.body.id })).body).toEqual({ error: "Unknown profile" });
-    expect((await request(admin, "GET", `/teams/${teamId}/profiles`)).body.profiles.map((p: { id: string }) => p.id)).toEqual([teamProfile.body.id]);
-    expect((await request(member, "GET", `/teams/${teamId}/profiles`)).body.profiles.map((p: { id: string }) => p.id).sort()).toEqual([teamProfile.body.id, own.body.id].sort());
-    expect((await request(admin, "PATCH", `/teams/${teamId}/profiles/${own.body.id}`, { version: 1, model: "x" })).status).toBe(404);
+    for (const given of [claudeProfile({ name: "Mine" }), claudeProfile({ personal: true, name: "Mine" })])
+      expect(await request(member, "POST", `/teams/${teamId}/profiles`, given)).toMatchObject({ status: 403, body: { error: "Team admin required" } });
+    expect((await request(member, "PATCH", `/teams/${teamId}/profiles/${teamProfile.body.id}`, { version: 1, model: "x" })).body).toEqual({ error: "Team admin required" });
+    expect((await request(member, "DELETE", `/teams/${teamId}/profiles/${teamProfile.body.id}`)).status).toBe(403);
+    expect((await request(member, "GET", `/teams/${teamId}/profiles`)).body.profiles.map((p: { id: string }) => p.id)).toEqual([teamProfile.body.id]);
+    const agent = await request(member, "POST", `/teams/${teamId}/agents`, { name: "Helper", personal: true, profileId: teamProfile.body.id });
+    expect(agent).toMatchObject({ status: 201, body: { personal: true, ownerUserId: member.id, profileId: teamProfile.body.id } });
     expect((await request(admin, "PATCH", `/teams/${teamId}/agents/${agent.body.id}`, { version: 1, playbook: "Be terse." })).body).toEqual({ error: "Only its owner changes a personal agent" });
     expect((await request(admin, "GET", `/teams/${teamId}/agents/${agent.body.id}/credentials`)).status).toBe(403);
     expect((await request(admin, "POST", `/teams/${teamId}/agents/${agent.body.id}/pause`)).body).toMatchObject({ paused: true });

@@ -54,7 +54,6 @@ export function newProfile(teamId: string, overrides: Partial<Profile> = {}): Pr
   return {
     id: randomUUID(),
     teamId,
-    ownerUserId: null,
     name: "Claude",
     provider: "claude-api",
     model: "claude-sonnet-5-5",

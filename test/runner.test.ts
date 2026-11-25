@@ -389,12 +389,8 @@ describe("controls (requirement 0004)", () => {
   it("AS2: a personal agent whose owner left the team starts no run; invited back, it works again", async () => {
     const { teamId, member, agent: teamAgent } = await w.team();
     void teamAgent;
-    const profile = (await w.agents.forTeam(teamId).listProfiles())[0]!;
-    const personal = { ...(await w.agents.forTeam(teamId).findAgent(teamAgent.id))!, id: randomUUID(), ownerUserId: member, profileId: null, version: 1 };
+    const personal = { ...(await w.agents.forTeam(teamId).findAgent(teamAgent.id))!, id: randomUUID(), ownerUserId: member, version: 1 };
     await w.agents.forTeam(teamId).insertAgent(personal);
-    const own = { ...profile, id: randomUUID(), ownerUserId: member, version: 1 };
-    await w.agents.forTeam(teamId).insertProfile(own);
-    await w.agents.forTeam(teamId).updateAgent(personal.id, 1, { profileId: own.id });
     const { sessionId } = await hostTrigger(teamId, personal.id);
     await w.directory.removeMember(teamId, member);
     await w.tick();
@@ -413,18 +409,6 @@ describe("controls (requirement 0004)", () => {
     w.anthropic.script(say("Done."), say("Summary."));
     await w.tick();
     expect((await lastRun(teamId, sessionId)).state).toBe("completed");
-  });
-
-  it("negative (AS2): a team agent never runs on a member's own profile", async () => {
-    const { teamId, member, agent } = await w.team();
-    const profile = (await w.agents.forTeam(teamId).listProfiles())[0]!;
-    const own = { ...profile, id: randomUUID(), ownerUserId: member, version: 1 };
-    await w.agents.forTeam(teamId).insertProfile(own);
-    await w.agents.forTeam(teamId).updateAgent(agent.id, agent.version, { profileId: own.id });
-    const { sessionId } = await hostTrigger(teamId, agent.id);
-    await w.tick();
-    expect(await lastRun(teamId, sessionId)).toMatchObject({ state: "failed", stopReason: "no-profile" });
-    expect(w.anthropic.requests).toEqual([]);
   });
 
   it("AS10: the hourly pass purges old transcripts and closes sessions idle for 7 days", async () => {

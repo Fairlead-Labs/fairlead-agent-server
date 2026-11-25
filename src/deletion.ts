@@ -9,8 +9,7 @@ import type { Work } from "./work.js";
  * everything of the server's in their personal space goes (agents,
  * profiles, connections, sessions, runs, questions, triggers, usage and
  * the space's key), their personal agents in teams are removed (their
- * open sessions closed, their credentials and the owner's own profiles
- * deleted), and they leave every session's and agent's owners.
+ * open sessions closed, their credentials deleted), and they leave every session's and agent's owners.
  *
  * Every step is safe to repeat, so a failure part-way is finished by the
  * sign-in service's next call. The directory's rows (the user, the
@@ -50,7 +49,6 @@ export function createAccountDeletion({
         await tx.query(`UPDATE agents SET profile_id = NULL WHERE team_id = $1 AND owner_user_id = $2 AND profile_id IS NOT NULL`, [teamId, userId]);
         await tx.query(`DELETE FROM agent_credentials WHERE team_id = $1 AND agent_id IN (${owned})`, [teamId, userId]);
         await tx.query(`DELETE FROM oauth_pending WHERE team_id = $1 AND (user_id = $2 OR agent_id IN (${owned}))`, [teamId, userId]);
-        await tx.query(`DELETE FROM profiles WHERE team_id = $1 AND owner_user_id = $2`, [teamId, userId]);
         await tx.query(
           `UPDATE sessions SET owner_user_ids = array_remove(owner_user_ids, $2), updated_at = $3, version = version + 1 WHERE team_id = $1 AND $2 = ANY (owner_user_ids)`,
           [teamId, userId, stamp],
