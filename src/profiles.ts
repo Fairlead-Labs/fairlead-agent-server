@@ -36,8 +36,6 @@ export interface ProfileSettings {
 export interface Profile extends ProfileSettings {
   id: string;
   teamId: string;
-  /** The user whose own profile it is, for their personal agents only; null for the team's (requirement 0004, *Model profiles*). */
-  ownerUserId: string | null;
   /** Sealed under the team key (`model-key`); null on a federated route. */
   apiKey: SealedValue | null;
   createdAt: string;

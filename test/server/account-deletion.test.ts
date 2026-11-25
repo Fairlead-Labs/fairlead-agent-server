@@ -78,15 +78,15 @@ const rowsIn = async (teamId: string, sql: string) => (await inTeam(w.db, teamId
 const userRow = async (subject: string) =>
   (await w.db.query<{ email: string | null; deleted_at: Date | null }>("SELECT email, deleted_at FROM directory.users WHERE issuer = $1 AND subject = $2", [issuer.url, subject])).rows[0];
 
-/** A person with a personal space (an agent, a profile, a session) and, in a team, a personal agent with an open session, owner marks on a team agent's session and as its default owner. */
+/** A person with a personal space (an agent, a profile, a session) and, in a team, a personal agent on the team's profile with an open session, owner marks on a team agent's session and as its default owner. */
 async function personWithEverything(admin: Person, teamId: string, teamAgentId: string) {
   const who = await person();
   expect((await request(admin.token, "POST", `/teams/${teamId}/members`, { userId: who.id, role: "member" })).status).toBe(204);
   const space = (await request(who.token, "POST", "/me/personal-space")).body.id as string;
-  const spaceProfile = await request(who.token, "POST", `/teams/${space}/profiles`, { name: "Mine", provider: "claude-api", model: "claude-sonnet-5-5", apiKey: "sk-test", personal: true });
+  const spaceProfile = await request(who.token, "POST", `/teams/${space}/profiles`, { name: "Mine", provider: "claude-api", model: "claude-sonnet-5-5", apiKey: "sk-test" });
   const spaceAgent = await request(who.token, "POST", `/teams/${space}/agents`, { name: "Mine", personal: true, profileId: spaceProfile.body.id });
   expect((await request(who.token, "POST", `/teams/${space}/agents/${spaceAgent.body.id}/sessions`, { message: "Sort my mail." })).status).toBe(201);
-  const profile = await request(who.token, "POST", `/teams/${teamId}/profiles`, { name: "Mine", provider: "claude-api", model: "claude-sonnet-5-5", apiKey: "sk-test", personal: true });
+  const profile = await request(admin.token, "POST", `/teams/${teamId}/profiles`, { name: "Claude", provider: "claude-api", model: "claude-sonnet-5-5", apiKey: "sk-test" });
   const agent = await request(who.token, "POST", `/teams/${teamId}/agents`, { name: "Helper", personal: true, profileId: profile.body.id });
   const session = await request(who.token, "POST", `/teams/${teamId}/agents/${agent.body.id}/sessions`, { message: "Draft the minutes." });
   expect(session.status).toBe(201);
@@ -114,10 +114,10 @@ describe("deleted accounts (requirement 0003)", () => {
     // DL2: nothing of the server's in the personal space; the directory's space stays for a sharing product to remove.
     for (const table of ["agents", "profiles", "sessions", "runs", "triggers", "usage", "team_keys"]) expect(await rowsIn(ada.space, `SELECT 1 FROM ${table} WHERE team_id = $1`), table).toEqual([]);
     expect((await w.db.query("SELECT 1 FROM directory.teams WHERE id = $1", [ada.space])).rows).toHaveLength(1);
-    // DL2: the personal agent in the team removed, its session closed, the owner's own profile gone.
+    // DL2: the personal agent in the team removed, its session closed; the team's profile it used stays.
     expect((await w.agents.forTeam(teamId).findAgent(ada.agentId))?.removedAt).not.toBeNull();
     expect(await w.store.forTeam(teamId).findSession(ada.sessionId)).toMatchObject({ state: "closed", closeReason: "agent-removed" });
-    expect(await w.agents.forTeam(teamId).findProfile(ada.profileId)).toBeUndefined();
+    expect(await w.agents.forTeam(teamId).findProfile(ada.profileId)).toBeDefined();
     // DL2: the owner marks dropped.
     expect((await w.store.forTeam(teamId).findSession(ada.teamSessionId))?.ownerUserIds).toEqual([admin.id]);
     expect((await w.agents.forTeam(teamId).findAgent(teamAgent.body.id))?.defaultOwnerUserIds).toEqual([bob.who.id]);

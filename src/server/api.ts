@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import { DEFAULT_LIMITS, DEFAULT_MAX_ACTIVE_SESSIONS, LIMIT_RANGES, MAX_ACTIVE_SESSIONS_RANGE, mayUseProfile, UnknownProfileError, type Agent, type AgentChanges, type AgentStore, type RunLimits } from "../agents.js";
+import { DEFAULT_LIMITS, DEFAULT_MAX_ACTIVE_SESSIONS, LIMIT_RANGES, MAX_ACTIVE_SESSIONS_RANGE, UnknownProfileError, type Agent, type AgentChanges, type AgentStore, type RunLimits } from "../agents.js";
 import { CONNECTION_NAME, type AgentCredential, type Connection, type ConnectionStore, type OAuthGrant } from "../connections.js";
 import type { Directory, DirectoryUser } from "../directory/index.js";
 import { isSecureUrl } from "../google.js";
@@ -20,7 +20,7 @@ import type { TriggerSenders } from "./senders.js";
  * *Work intake*): every call a signed-in user's, judged by their own role in
  * the space it names: a team's admins manage its team agents, profiles and
  * connections (every member reads the team's profiles); a personal agent
- * and its owner's own profiles are its owner's alone; every member reads the team's sessions, starts work and
+ * is its owner's alone; every member reads the team's sessions, starts work and
  * answers the questions of sessions they own. A space the caller is not in
  * is 404. Secrets are write-only. The host's triggers come in by its own
  * credential, and the OAuth callback by its state.
@@ -134,7 +134,7 @@ const agentView = (a: Agent) => ({
   version: a.version,
 });
 
-const profileView = ({ apiKey, teamId: _team, ...rest }: Profile) => ({ ...rest, personal: rest.ownerUserId !== null, hasApiKey: apiKey !== null });
+const profileView = ({ apiKey, teamId: _team, ...rest }: Profile) => ({ ...rest, hasApiKey: apiKey !== null });
 const connectionView = ({ teamId: _team, oauthClient, ...rest }: Connection) => ({ ...rest, oauthClientId: oauthClient?.clientId ?? null });
 const credentialView = (c: AgentCredential, name: string | undefined) => ({ connectionId: c.connectionId, connection: name ?? null, kind: c.kind, state: c.state, scope: c.scope, updatedAt: c.updatedAt });
 const runView = (r: Run) => ({
@@ -359,7 +359,7 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
       check(id === null || typeof id === "string");
       if (id !== null) {
         const profile = await agents.forTeam(teamOf(c)).findProfile(id as string);
-        if (!profile || !mayUseProfile(agent, profile)) throw new UnknownProfileError();
+        if (!profile) throw new UnknownProfileError();
       }
       changes.profileId = id as string | null;
     }
@@ -438,22 +438,21 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
     return c.body(null, 204);
   });
 
-  // ---- profiles: the team's by its admins, a user's own by that user
+  // ---- profiles: the team's, kept by its admins (a personal space's person is its admin)
 
   app.get("/teams/:teamId/profiles", async (c) => {
     const role = await roleIn(c);
     if (!role) return notFound(c, "Team not found");
-    // The team's for every member (their personal agents may use them; secrets are never shown), a member's own for them alone.
-    const visible = (await agents.forTeam(teamOf(c)).listProfiles()).filter((p) => p.ownerUserId === null || p.ownerUserId === me(c));
-    return c.json({ profiles: visible.map(profileView) });
+    // Every member's, as their personal agents use them; secrets are never shown.
+    return c.json({ profiles: (await agents.forTeam(teamOf(c)).listProfiles()).map(profileView) });
   });
 
   const profileOf = async (c: Context<Env>) => {
     const role = await roleIn(c);
     if (!role) return { response: notFound(c, "Team not found") };
     const profile = await agents.forTeam(teamOf(c)).findProfile(c.req.param("profileId")!);
-    const mine = profile && (profile.ownerUserId === null ? role === "admin" : profile.ownerUserId === me(c));
-    return mine ? { profile } : { response: notFound(c, "Profile not found") };
+    if (!profile) return { response: notFound(c, "Profile not found") };
+    return role === "admin" ? { profile } : { response: forbidden(c, "Team admin required") };
   };
 
   const apiKeyOf = async (c: Context<Env>, given: Json): Promise<SealedValue | null | undefined> => {
@@ -466,14 +465,12 @@ export function createApiApp(deps: ApiDependencies): Hono<Env> {
     const role = await roleIn(c);
     if (!role) return notFound(c, "Team not found");
     const given = await body(c);
-    const personal = given["personal"] === true;
-    if (!personal && role !== "admin") return forbidden(c, "Team admin required");
+    if (role !== "admin") return forbidden(c, "Team admin required");
     const stamp = now().toISOString();
     const profile: Profile = {
       ...profileFields(given),
       id: randomUUID(),
       teamId: teamOf(c),
-      ownerUserId: personal ? me(c) : null,
       apiKey: (await apiKeyOf(c, given)) ?? null,
       createdAt: stamp,
       updatedAt: stamp,

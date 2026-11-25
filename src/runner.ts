@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mayUseProfile, type Agent, type AgentStore, type ModelChoice } from "./agents.js";
+import { type Agent, type AgentStore, type ModelChoice } from "./agents.js";
 import type { Directory } from "./directory/index.js";
 import type { TeamSealer } from "./keys.js";
 import { McpAuthError, McpError, McpUnavailableError, TERMINAL_TASK_STATUSES, type McpTask, type ToolResult } from "./mcp/client.js";
@@ -156,11 +156,11 @@ export function createRunner(deps: RunnerDependencies) {
   const playbooks: Record<PlaybookLanguage, Playbook[]> = { en: loadPlaybooks("en"), de: loadPlaybooks("de") };
   const clientFor = deps.client ?? ((choice: ModelChoice, context: ClientContext) => createModelClient(choice.target, context));
 
-  /** The agent's model: its profile, if it may use it, its API key opened. */
+  /** The agent's model: its profile (its team's, by the store's scope), its API key opened. */
   async function modelOf(teamId: string, agent: Agent): Promise<ModelChoice | undefined> {
     if (agent.profileId === null) return undefined;
     const profile = await deps.agents.forTeam(teamId).findProfile(agent.profileId);
-    if (!profile || !mayUseProfile(agent, profile)) return undefined;
+    if (!profile) return undefined;
     const apiKey = profile.apiKey === null ? undefined : await deps.sealer.open(teamId, "model-key", profile.apiKey);
     const target = modelTargetOf(profile, apiKey);
     if (!target) return undefined;

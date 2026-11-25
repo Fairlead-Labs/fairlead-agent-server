@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { describe, expect, it } from "vitest";
 import { migrate, MigrationError } from "../src/index.js";
 import { migrateDatabase, MIGRATIONS, SERVER_SCHEMA } from "../src/migrations.js";
-import { DIRECTORY_MIGRATIONS } from "../src/directory/migrations.js";
+import { DIRECTORY_MIGRATIONS, migrateDirectory } from "../src/directory/migrations.js";
 
 /** Requirement 0002 (HK11, HK12, HK14): the migrations the server applies at every start, and the host views they add. */
 
@@ -79,6 +79,26 @@ describe("migrations (requirement 0002)", () => {
     ]);
     // Negative: no table of the schema, the ledger included, is readable through the views' grant.
     for (const table of tables) await expect(db.query(`SELECT 1 FROM ${SERVER_SCHEMA}.${table} LIMIT 1`), table).rejects.toThrow(/permission denied/);
+    await db.close();
+  });
+
+  it("AS2: profiles become the team's alone; a member's own profile in a team is removed and its agents left without one, one in a personal space kept as the space's", async () => {
+    const db = new PGlite();
+    await migrateDirectory(db);
+    await migrate(db, MIGRATIONS.filter((m) => m.name < "0005"), SERVER_SCHEMA);
+    const [user, space, team, own, spaceOwn, shared, agent] = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    await db.query("INSERT INTO directory.users (id, issuer, subject, created_at) VALUES ($1, 'i', 's', now())", [user]);
+    await db.query("INSERT INTO directory.teams (id, name, kind, personal_user_id, created_at) VALUES ($1, 'Personal', 'personal', $2, now()), ($3, 'Finance', 'team', NULL, now())", [space, user, team]);
+    await db.query(
+      `INSERT INTO ${SERVER_SCHEMA}.profiles (id, team_id, owner_user_id, doc, created_at, updated_at, version) VALUES
+         ($1, $4, $5, '{}', now(), now(), 1), ($2, $6, $5, '{}', now(), now(), 1), ($3, $4, NULL, '{}', now(), now(), 1)`,
+      [own, spaceOwn, shared, team, user, space],
+    );
+    await db.query(`INSERT INTO ${SERVER_SCHEMA}.agents (id, team_id, name, owner_user_id, profile_id, limits, created_at, updated_at, version) VALUES ($1, $2, 'Helper', $3, $4, '{}', now(), now(), 1)`, [agent, team, user, own]);
+    expect(await migrateDatabase(db)).toEqual(MIGRATIONS.filter((m) => m.name >= "0005").map((m) => m.name));
+    expect((await db.query<{ id: string }>(`SELECT id FROM ${SERVER_SCHEMA}.profiles ORDER BY id`)).rows.map((r) => r.id)).toEqual([spaceOwn, shared].sort());
+    expect((await db.query(`SELECT profile_id, version FROM ${SERVER_SCHEMA}.agents`)).rows).toEqual([{ profile_id: null, version: 2 }]);
+    expect((await db.query("SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'profiles' AND column_name = 'owner_user_id'", [SERVER_SCHEMA])).rows).toEqual([]);
     await db.close();
   });
 });

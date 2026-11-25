@@ -66,8 +66,7 @@ Only the sign-in service's own identity is admitted: a token of
   profiles, connections, sessions, runs, questions, triggers, usage and the
   space's key.
 - Their personal agents in teams are removed (open sessions closed as
-  `agent-removed`, credentials deleted) and their own profiles there
-  deleted; they leave every session's owners and every agent's default
+  `agent-removed`, credentials deleted); the team's profiles stay; they leave every session's owners and every agent's default
   owners.
 - The directory's rows stay: the personal space, its membership and the
   person's memberships in teams. A product sharing the directory removes
@@ -115,7 +114,7 @@ its writes. Anyone may leave a team, the last admin excepted.
 | D11 | The API above. Negative per route: a non-member gets 404 for the team, a member without the admin role 403 for its writes; team creation is 403 when the installation does not allow it | `test/server/directory-api.test.ts` |
 | D12 | An installation admin may list and remove any team and is not thereby a member of any | `test/server/directory-api.test.ts` |
 | DL1 | `POST /users/deleted` marks the user `deleted_at` (made when unknown) and clears the email; the person's tokens are refused afterwards | `test/server/account-deletion.test.ts` |
-| DL2 | The personal space's records, the person's personal agents and own profiles in teams and their owner marks go; the directory's rows stay. Negative: another user's records, agents, profiles and sessions are untouched | `test/server/account-deletion.test.ts` |
+| DL2 | The personal space's records, the person's personal agents in teams and their owner marks go, the team's profiles stay; the directory's rows stay. Negative: another user's records, agents, profiles and sessions are untouched | `test/server/account-deletion.test.ts` |
 | DL3 | Twice is the same: `deleted_at` keeps the first time | `test/server/account-deletion.test.ts` |
 | DL4 | Only the sign-in service's identity is admitted. Negative: the host's credential, a person's token, a token for another audience or subject, a forged token or none is 401 and marks nobody; a body without an issuer and a subject is 400; one of the three settings alone stops the start | `test/server/account-deletion.test.ts`, `test/server/startup-config.test.ts` |
 | DL5 | A team's `retention_days` is the transcripts' cutoff; a team without one keeps 30 days. Negative: a value out of range is refused | `test/runner.test.ts` (AS10) |

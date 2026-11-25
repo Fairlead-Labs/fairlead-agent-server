@@ -290,11 +290,29 @@ const HOST_SESSION: readonly string[] = [
           FROM runs r`,
 ];
 
+/**
+ * Profiles are the team's alone, a personal space's being its person's
+ * (requirement 0004, *Model profiles*): a member's own profile in a team is
+ * removed, its agents left without one; one in a personal space stays as
+ * the space's.
+ */
+const TEAM_PROFILES: readonly string[] = [
+  `UPDATE agents a SET profile_id = NULL, version = a.version + 1
+     FROM profiles p
+    WHERE p.team_id = a.team_id AND p.id = a.profile_id AND p.owner_user_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM directory.teams t WHERE t.id::text = p.team_id AND t.kind = 'personal')`,
+  `DELETE FROM profiles p
+    WHERE p.owner_user_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM directory.teams t WHERE t.id::text = p.team_id AND t.kind = 'personal')`,
+  `ALTER TABLE profiles DROP COLUMN owner_user_id`,
+];
+
 export const MIGRATIONS: readonly Migration[] = [
   { name: "0001-server", statements: SERVER },
   { name: "0002-host-views-active-sessions", statements: HOST },
   { name: "0003-active-sessions-cap", statements: CAP },
   { name: "0004-host-runs-session", statements: HOST_SESSION },
+  { name: "0005-team-profiles", statements: TEAM_PROFILES },
 ];
 
 /** Brings the database to this version's tables: the directory, then the server's own. Answers the names applied now. */

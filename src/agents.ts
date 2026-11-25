@@ -8,7 +8,8 @@ import type { Profile, ProfileSettings } from "./profiles.js";
  * agent lives in exactly one space (a team, or a user's personal space)
  * and works only there. A team agent has no owner and uses the team's
  * profiles; a personal agent has its user as owner and uses the team's
- * profiles or that user's own. Per team, under row-level security.
+ * profiles too. A profile is only ever found in its own team, so an agent
+ * never names another team's. Per team, under row-level security.
  */
 
 /** Each limit `null` for *None* (requirement 0001, *Limits*). The 15-minute slice is the server's own and not here. */
@@ -81,9 +82,6 @@ export interface TeamAgentStore {
 
 export type AgentStore = TeamScoped<TeamAgentStore>;
 
-/** Whether an agent may use a profile: any agent the team's, a personal agent also its owner's own; a team agent never a member's. */
-export const mayUseProfile = (agent: Pick<Agent, "ownerUserId">, profile: Pick<Profile, "ownerUserId">) => profile.ownerUserId === null || agent.ownerUserId === profile.ownerUserId;
-
 type Row = Record<string, unknown>;
 const iso = (value: unknown) => (value === null || value === undefined ? null : new Date(value as string).toISOString());
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -92,7 +90,7 @@ const json = (value: unknown) => (value === null || value === undefined ? null :
 
 const AGENT_COLUMNS =
   "id, team_id, name, description, owner_user_id, profile_id, ask_owners, limits, playbook, default_owner_user_ids, time_zone, language, paused, max_active_sessions, created_at, updated_at, removed_at, version";
-const PROFILE_COLUMNS = "id, team_id, owner_user_id, doc, api_key, created_at, updated_at, version";
+const PROFILE_COLUMNS = "id, team_id, doc, api_key, created_at, updated_at, version";
 
 const agentOf = (row: Row): Agent => ({
   id: row["id"] as string,
@@ -123,7 +121,6 @@ const profileOf = (row: Row): Profile => ({
   ...settingsOf(row["doc"] as ProfileSettings),
   id: row["id"] as string,
   teamId: row["team_id"] as string,
-  ownerUserId: (row["owner_user_id"] as string | null) ?? null,
   apiKey: (row["api_key"] as Profile["apiKey"]) ?? null,
   createdAt: iso(row["created_at"])!,
   updatedAt: iso(row["updated_at"])!,
@@ -237,10 +234,9 @@ class PostgresTeamAgents implements TeamAgentStore {
 
   async insertProfile(p: Profile) {
     await this.tx((tx) =>
-      tx.query(`INSERT INTO profiles (${PROFILE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      tx.query(`INSERT INTO profiles (${PROFILE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
         p.id,
         this.teamId,
-        p.ownerUserId,
         JSON.stringify(settingsOf(p)),
         json(p.apiKey),
         p.createdAt,
